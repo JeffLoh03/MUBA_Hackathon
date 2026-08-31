@@ -1,5 +1,3 @@
-"use client";
-
 import { useVerification } from "../hooks/useVerification";
 import { AnalysisProgress } from "./AnalysisProgress";
 import { AppHeader } from "./AppHeader";

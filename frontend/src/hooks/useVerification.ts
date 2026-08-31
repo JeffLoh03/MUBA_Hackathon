@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useMemo, useState } from "react";
 import { analysisStages } from "../data/mockVerification";
 import type { StageStatus, VerificationMode, VerificationStatus } from "../types/verification";

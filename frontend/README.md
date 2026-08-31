@@ -1,29 +1,28 @@
 # Verity Desk Frontend
 
-React/Vinext prototype for evidence-led news verification. The current version uses mock data and simulates the complete DeepSeek, Kimi, MiniMax, and rule-engine workflow.
+Local React, Vite, and TypeScript prototype for evidence-led news verification. It uses mock data to simulate the DeepSeek, Kimi, MiniMax, and rule-engine workflow.
 
-## Project Structure
+## Structure
 
-- `app/components/` - reusable interface sections and workflows
-- `app/data/` - mock verification results
-- `app/hooks/` - progress and verification state
-- `app/types/` - shared TypeScript contracts
-- `app/login/` - mock sign-in route
-- `public/` - static and social-preview assets
-- `tests/` - server-render checks
+- `src/components/` - reusable interface and workflow components
+- `src/pages/` - route-level pages
+- `src/hooks/` - verification progress and state
+- `src/data/` - mock verification results
+- `src/types/` - shared TypeScript contracts
+- `public/` - static assets
 
-## Local Development
+## Development
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. Enter any complete `http://` or `https://` URL to run the simulated verification.
+Open `http://localhost:5173`.
 
-## Verification
+## Validation
 
 ```bash
+npm run lint
 npm run build
-npm test
 ```

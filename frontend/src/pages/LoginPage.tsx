@@ -1,28 +1,27 @@
-"use client";
-
 import { ArrowLeft, BookOpenCheck, Eye, EyeOff, LockKeyhole, Mail } from "lucide-react";
-import { FormEvent, useState } from "react";
-import Link from "next/link";
+import { type FormEvent, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
-export default function LoginPage() {
+export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const navigate = useNavigate();
 
   function submit(event: FormEvent) {
     event.preventDefault();
     setSubmitted(true);
-    window.setTimeout(() => { window.location.href = "/"; }, 700);
+    window.setTimeout(() => navigate("/"), 700);
   }
 
   return (
     <main className="login-page">
       <section className="login-context">
-        <Link className="brand inverse" href="/"><span className="brand-mark light"><BookOpenCheck size={19} /></span><span>VERITY DESK</span></Link>
+        <Link className="brand inverse" to="/"><span className="brand-mark light"><BookOpenCheck size={19} /></span><span>VERITY DESK</span></Link>
         <div><p className="eyebrow">Investigative workspace</p><h1>Evidence deserves<br />a clear record.</h1><p>Sign in to retain investigations, revisit source trails, and export complete verification reports.</p></div>
         <span className="context-footnote">MULTI-MODEL ANALYSIS · RULE-BASED REVIEW</span>
       </section>
       <section className="login-form-wrap">
-        <Link className="back-link" href="/"><ArrowLeft size={16} /> Back to workspace</Link>
+        <Link className="back-link" to="/"><ArrowLeft size={16} /> Back to workspace</Link>
         <form className="login-form" onSubmit={submit}>
           <div><p className="eyebrow">Secure access</p><h2>Sign in to your desk</h2><p>Use your organisation credentials to continue.</p></div>
           <label>Email address<div className="login-input"><Mail size={17} /><input type="email" placeholder="analyst@organisation.com" required /></div></label>

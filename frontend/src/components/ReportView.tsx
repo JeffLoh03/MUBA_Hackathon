@@ -1,7 +1,5 @@
-"use client";
-
 import { Check, CheckCircle2, ChevronRight, Copy, Download, ExternalLink, RotateCcw, ShieldAlert } from "lucide-react";
-import { useState } from "react";
+import { type CSSProperties, useState } from "react";
 import { evidenceSources, modelFindings, scoreMetrics } from "../data/mockVerification";
 import type { VerificationMode } from "../types/verification";
 
@@ -33,7 +31,7 @@ export function ReportView({ mode, url, onReset }: ReportViewProps) {
         <div className="verdict-grid">
           <div><p className="eyebrow">Final assessment</p><h1>Likely true,<br />with context.</h1><p className="verdict-summary">The central event is supported by reliable, independent evidence. However, the article&apos;s image is authentic but comes from an earlier related event and may mislead readers about timing.</p></div>
           <div className="score-block">
-            <div className="score-ring" style={{ "--score": score } as React.CSSProperties}><span><strong>{score}</strong><small>/ 100</small></span></div>
+            <div className="score-ring" style={{ "--score": score } as CSSProperties}><span><strong>{score}</strong><small>/ 100</small></span></div>
             <div><strong>Strong evidence</strong><span>{sourceCount} sources reviewed</span><span>4 independent origin chains</span></div>
           </div>
         </div>
