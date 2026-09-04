@@ -162,9 +162,7 @@ npm run lint
 npm run build
 ```
 
-Python tests use mocks and do not call Gonka or search providers.
-
-GitHub Actions runs the same Python tests, frontend lint and frontend build for every push and pull request. The workflow does not receive a Gonka API key and cannot make paid live requests.
+Python tests use mocks and do not call Gonka or search providers. These checks run locally and do not require GitHub Actions.
 
 ## Live Evaluation
 
