@@ -1,36 +1,100 @@
-import { ArrowRight, Link2, ShieldCheck, Zap } from "lucide-react";
+import { MonitorUp, Plus, Send, ShieldCheck, X, Zap } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { VerificationMode } from "../types/verification";
 
 interface VerificationFormProps {
-  url: string;
+  input: string;
+  image: File | null;
   mode: VerificationMode;
   error: string;
-  onUrlChange: (value: string) => void;
+  showBrowser: boolean;
+  onInputChange: (value: string) => void;
+  onImageSelect: (file: File | null) => void;
+  onImageRemove: () => void;
   onModeChange: (mode: VerificationMode) => void;
+  onShowBrowserChange: (value: boolean) => void;
   onSubmit: () => void;
 }
 
-export function VerificationForm({ url, mode, error, onUrlChange, onModeChange, onSubmit }: VerificationFormProps) {
+function ImageAttachment({ image, onRemove }: { image: File; onRemove: () => void }) {
+  const [previewUrl] = useState(() => URL.createObjectURL(image));
+
+  useEffect(() => () => URL.revokeObjectURL(previewUrl), [previewUrl]);
+
+  return <div className="image-attachment">
+    <img src={previewUrl} alt="Selected upload preview" />
+    <span><strong>{image.name}</strong><small>{(image.size / 1024 / 1024).toFixed(2)} MB</small></span>
+    <button type="button" onClick={onRemove} title="Remove image" aria-label="Remove image"><X size={16} /></button>
+  </div>;
+}
+
+export function VerificationForm({ input, image, mode, error, showBrowser, onInputChange, onImageSelect, onImageRemove, onModeChange, onShowBrowserChange, onSubmit }: VerificationFormProps) {
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [dragActive, setDragActive] = useState(false);
+
   return (
     <section className="hero-workspace">
-      <div className="section-label"><span>NEW INVESTIGATION</span><span>CASE 01428</span></div>
+      <div className="section-label"><span>NEW INVESTIGATION</span><span>LIVE GONKA REVIEW</span></div>
       <div className="hero-copy">
         <div><p className="eyebrow">Evidence-led news verification</p><h1>Check the claim.<br />Trace the evidence.</h1></div>
-        <p className="intro">Submit a news article for a structured review across multiple AI analysts and a deterministic evidence framework.</p>
+        <p className="intro">Paste a claim or article link, or attach a news image. DeepSeek and Kimi will review evidence while source rules check credibility.</p>
       </div>
       <div className="verification-panel">
-        <label htmlFor="article-url">ARTICLE URL</label>
-        <div className={error ? "url-row has-error" : "url-row"}>
-          <div className="url-field"><Link2 size={19} /><input id="article-url" type="url" value={url} onChange={(event) => onUrlChange(event.target.value)} onKeyDown={(event) => event.key === "Enter" && onSubmit()} placeholder="https://news.example.com/article" aria-describedby={error ? "url-error" : undefined} /></div>
-          <button className="primary-button" type="button" onClick={onSubmit}>Start verification <ArrowRight size={18} /></button>
+        <label htmlFor="verification-input">WHAT SHOULD WE CHECK?</label>
+        <div
+          className={`chat-composer ${error ? "has-error" : ""} ${dragActive ? "drag-active" : ""}`}
+          onDragEnter={(event) => { event.preventDefault(); setDragActive(true); }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={(event) => { if (event.currentTarget === event.target) setDragActive(false); }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragActive(false);
+            onImageSelect(event.dataTransfer.files[0] ?? null);
+          }}
+        >
+          {image && <ImageAttachment key={`${image.name}-${image.size}-${image.lastModified}`} image={image} onRemove={onImageRemove} />}
+          <textarea
+            id="verification-input"
+            value={input}
+            onChange={(event) => onInputChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                onSubmit();
+              }
+            }}
+            placeholder={image ? "Add the caption or claim shown with this image..." : "Paste a news claim, article URL, or statement to verify..."}
+            aria-describedby={error ? "verification-error" : undefined}
+            rows={4}
+          />
+          <div className="composer-actions">
+            <input
+              ref={fileInput}
+              className="hidden-file-input"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={(event) => {
+                onImageSelect(event.target.files?.[0] ?? null);
+                event.target.value = "";
+              }}
+            />
+            <button className="attach-button" type="button" onClick={() => fileInput.current?.click()} title="Attach JPG, PNG, or WEBP image" aria-label="Attach image"><Plus size={20} /></button>
+            <span className="composer-hint">Text, URL, or image · Shift + Enter for new line</span>
+            <button className="send-button" type="button" onClick={onSubmit}><span>Verify</span><Send size={17} /></button>
+          </div>
         </div>
-        {error && <p className="field-error" id="url-error">{error}</p>}
+        {error && <p className="field-error" id="verification-error">{error}</p>}
         <div className="mode-row" role="radiogroup" aria-label="Verification depth">
-          <button className={mode === "quick" ? "mode-option active" : "mode-option"} onClick={() => onModeChange("quick")} role="radio" aria-checked={mode === "quick"}><span className="mode-icon"><Zap size={17} /></span><span><strong>Quick review</strong><small>3-5 trusted sources · ~2 minutes</small></span></button>
-          <button className={mode === "professional" ? "mode-option active" : "mode-option"} onClick={() => onModeChange("professional")} role="radio" aria-checked={mode === "professional"}><span className="mode-icon"><ShieldCheck size={17} /></span><span><strong>Professional review</strong><small>15-20 sources · deeper cross-check</small></span></button>
+          <button className={mode === "quick" ? "mode-option active" : "mode-option"} onClick={() => onModeChange("quick")} role="radio" aria-checked={mode === "quick"}><span className="mode-icon"><Zap size={17} /></span><span><strong>Quick review</strong><small>Up to 5 evidence sources</small></span></button>
+          <button className={mode === "professional" ? "mode-option active" : "mode-option"} onClick={() => onModeChange("professional")} role="radio" aria-checked={mode === "professional"}><span className="mode-icon"><ShieldCheck size={17} /></span><span><strong>Professional review</strong><small>Up to 12 sources and deeper search</small></span></button>
         </div>
+        <label className="browser-toggle">
+          <input type="checkbox" checked={showBrowser} onChange={(event) => onShowBrowserChange(event.target.checked)} />
+          <span className="browser-toggle-box"><MonitorUp size={17} /></span>
+          <span><strong>Show live browser window</strong><small>Open Chrome locally while evidence pages are checked.</small></span>
+        </label>
       </div>
-      <div className="trust-note"><ShieldCheck size={17} /><span>Every verdict includes model opinions, rule deductions, and the complete score breakdown.</span></div>
+      <div className="trust-note"><ShieldCheck size={17} /><span>Every verdict includes model opinions, source risk, evidence links and Gonka request IDs.</span></div>
     </section>
   );
 }

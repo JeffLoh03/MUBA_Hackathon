@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.streamlit/secrets.toml
+test_results.json
+live_evaluation_results.json
+*.pyc
+uploaded_images/
+frontend/node_modules/
+frontend/dist/
+.runtime/
+tmp/
+.coverage
+htmlcov/
+.DS_Store
