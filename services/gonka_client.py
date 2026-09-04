@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from config import AppConfig
 from schemas.models import GonkaTraceRecord
@@ -58,12 +59,19 @@ class GonkaClient:
     def __init__(self, config: AppConfig, timeout: float | None = None, max_retries: int = 0) -> None:
         self.config = config
         self._secrets = [config.gonka_api_key, config.tavily_api_key]
-        timeout_seconds = timeout if timeout is not None else config.gonka_timeout_seconds
+        self._timeout_seconds = timeout if timeout is not None else config.gonka_timeout_seconds
+        self._max_retries = max_retries
         self.client = OpenAI(
             api_key=config.gonka_api_key,
             base_url=config.gonka_base_url,
-            timeout=httpx.Timeout(timeout_seconds, connect=min(20.0, timeout_seconds)),
+            timeout=self._http_timeout(),
             max_retries=max_retries,
+        )
+
+    def _http_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            self._timeout_seconds,
+            connect=min(20.0, self._timeout_seconds),
         )
 
     def list_models(self) -> list[str]:
@@ -93,15 +101,15 @@ class GonkaClient:
         timestamp = utc_now_iso()
         start = time.perf_counter()
         try:
-            raw_response = self.client.chat.completions.with_raw_response.create(
-                model=model_id,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
+            headers, parsed = asyncio.run(
+                self._chat_with_total_deadline(
+                    model_id=model_id,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
             )
             latency_ms = round((time.perf_counter() - start) * 1000, 2)
-            headers = normalize_headers(getattr(raw_response, "headers", {}))
-            parsed = raw_response.parse()
             request_id, trace_id = extract_request_trace_ids(headers)
             text = extract_response_text(parsed)
             trace = GonkaTraceRecord(
@@ -137,6 +145,31 @@ class GonkaClient:
                 safe_error_message=redact_secrets(str(error), self._secrets),
             )
             raise GonkaCallFailed(error, trace) from exc
+
+    async def _chat_with_total_deadline(
+        self,
+        *,
+        model_id: str,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        temperature: float,
+    ) -> tuple[dict[str, str], Any]:
+        async with asyncio.timeout(self._timeout_seconds):
+            async with AsyncOpenAI(
+                api_key=self.config.gonka_api_key,
+                base_url=self.config.gonka_base_url,
+                timeout=self._http_timeout(),
+                max_retries=self._max_retries,
+            ) as client:
+                raw_response = await client.chat.completions.with_raw_response.create(
+                    model=model_id,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            headers = normalize_headers(getattr(raw_response, "headers", {}))
+            parsed = raw_response.parse()
+            return headers, parsed
 
     def chat_json(
         self,

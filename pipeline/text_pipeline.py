@@ -34,6 +34,40 @@ from services.source_ranker import classify_source, publisher_from_url, root_dom
 ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 
+def build_verifier_payload(
+    claim: str,
+    evidence: list[EvidenceItem],
+    source_credibility: SourceCredibilityAssessment,
+) -> dict[str, Any]:
+    compact_evidence = [
+        {
+            "id": item.evidence_id,
+            "title": item.title[:160],
+            "domain": item.root_domain,
+            "publisher": item.publisher,
+            "published_date": item.published_date,
+            "excerpt": item.excerpt[:700],
+            "source_type": item.source_type,
+            "source_quality": item.source_quality,
+        }
+        for item in evidence
+    ]
+    compact_credibility = {
+        "source_trust_score": source_credibility.source_trust_score,
+        "website_risk_level": source_credibility.website_risk_level,
+        "independent_source_count": source_credibility.independent_source_count,
+        "high_quality_source_count": source_credibility.high_quality_source_count,
+        "official_source_count": source_credibility.official_source_count,
+        "duplicate_or_syndication_risk": source_credibility.duplicate_or_syndication_risk,
+        "risk_signals": source_credibility.risk_signals[:4],
+    }
+    return {
+        "claim": claim,
+        "evidence": compact_evidence,
+        "source_credibility": compact_credibility,
+    }
+
+
 class PipelineConfigError(Exception):
     pass
 
@@ -155,20 +189,23 @@ class TextFactCheckPipeline:
             queries = deterministic_search_queries(claim)
             query_traces = []
             query_limitations = []
+        planned_queries = queries.as_list()
+        if not self.use_ai_search_planning:
+            planned_queries = [planned_queries[index] for index in (0, 1, 3)]
         traces.extend(query_traces)
         self._emit(
             "Search planning completed",
             {
-                "queries": queries.as_list(),
+                "queries": planned_queries,
                 "strategy": "ai" if self.use_ai_search_planning else "deterministic",
                 "fallback_limitations": query_limitations,
             },
         )
 
-        self._emit("Web search started", {"query_count": len(queries.as_list())})
-        self._preview_browser_searches(queries.as_list())
+        self._emit("Web search started", {"query_count": len(planned_queries)})
+        self._preview_browser_searches(planned_queries)
         search_results = self.search_provider.search_many(
-            queries.as_list(),
+            planned_queries,
             max_results_per_query=self.max_results_per_query,
         )
         search_errors = list(getattr(self.search_provider, "last_errors", []))
@@ -196,7 +233,7 @@ class TextFactCheckPipeline:
         )
         self._preview_browser_urls([item.url for item in search_results[:5]])
         self._emit("Evidence processing started", {"raw_result_count": len(search_results)})
-        evidence = self.evidence_processor.build_evidence(search_results)
+        evidence = self.evidence_processor.build_evidence(search_results, claim=claim)
         if source_article is not None:
             source_evidence = article_to_evidence(source_article)
             evidence = relabel_evidence(remove_near_duplicates([source_evidence, *evidence]))
@@ -235,6 +272,7 @@ class TextFactCheckPipeline:
         expected_verifier_count = 0
         judge_output = None
         judge_limitations: list[str] = []
+        initially_failed_verifier_models: set[str] = set()
         if not evidence:
             setup_limitations.append(
                 "Gonka verifier calls were skipped because there was no evidence to review."
@@ -259,6 +297,8 @@ class TextFactCheckPipeline:
                 )
             expected_verifier_count = len(verifier_specs)
             failed_verifier_specs = []
+            failed_verifier_traces: dict[str, list[Any]] = {}
+            timed_out_verifier_steps: set[str] = set()
 
             for label, _, model_id, _ in verifier_specs:
                 self._emit(f"{label} started", {"model": model_id})
@@ -301,18 +341,52 @@ class TextFactCheckPipeline:
                     verifier_outputs.append(output)
                 else:
                     failed_verifier_specs.append(spec)
+                    failed_verifier_traces[step_name] = output_traces
+                    initially_failed_verifier_models.add(model_id)
+                    if traces_include_timeout(output_traces):
+                        timed_out_verifier_steps.add(step_name)
 
             decisive_count = sum(output.verdict != "unverified" for output in verifier_outputs)
-            if decisive_count < 2 and failed_verifier_specs:
+            retryable_failed_specs = [
+                spec
+                for spec in failed_verifier_specs
+                if spec[1] not in timed_out_verifier_steps
+                and not any(
+                    getattr(trace, "success", False)
+                    for trace in failed_verifier_traces.get(spec[1], [])
+                )
+            ]
+            timed_out_specs = [
+                spec for spec in failed_verifier_specs if spec[1] in timed_out_verifier_steps
+            ]
+            format_failed_specs = [
+                spec
+                for spec in failed_verifier_specs
+                if spec not in timed_out_specs and spec not in retryable_failed_specs
+            ]
+            for label, step_name, _, _ in timed_out_specs:
+                role = "fallback verifier" if step_name == "verifier_fallback" else label
+                verifier_limitations.append(
+                    f"{role.capitalize()} failed with a timeout and was excluded from consensus "
+                    "without an immediate retry."
+                )
+            for label, step_name, _, _ in format_failed_specs:
+                role = "fallback verifier" if step_name == "verifier_fallback" else label
+                verifier_limitations.append(
+                    f"{role.capitalize()} exhausted its format validation attempts and was "
+                    "excluded from consensus without another recovery layer."
+                )
+
+            if decisive_count < 2 and retryable_failed_specs:
                 self._emit(
                     "Verifier quorum recovery started",
                     {
                         "decisive_outputs": decisive_count,
-                        "retry_models": [spec[2] for spec in failed_verifier_specs],
+                        "retry_models": [spec[2] for spec in retryable_failed_specs],
                     },
                 )
                 with ThreadPoolExecutor(
-                    max_workers=len(failed_verifier_specs),
+                    max_workers=len(retryable_failed_specs),
                     thread_name_prefix="verity-recovery",
                 ) as executor:
                     recovery_futures = [
@@ -325,12 +399,12 @@ class TextFactCheckPipeline:
                             evidence=evidence,
                             source_credibility=source_credibility,
                         )
-                        for _, step_name, model_id, prompt_name in failed_verifier_specs
+                        for _, step_name, model_id, prompt_name in retryable_failed_specs
                     ]
                     recovery_results = [future.result() for future in recovery_futures]
 
                 recovered_models = []
-                for spec, result in zip(failed_verifier_specs, recovery_results):
+                for spec, result in zip(retryable_failed_specs, recovery_results):
                     label, step_name, model_id, _ = spec
                     output, output_traces, succeeded = result
                     traces.extend(output_traces)
@@ -355,13 +429,30 @@ class TextFactCheckPipeline:
                     },
                 )
             else:
-                for label, step_name, _, _ in failed_verifier_specs:
+                for label, step_name, _, _ in retryable_failed_specs:
                     role = "fallback verifier" if step_name == "verifier_fallback" else label
                     verifier_limitations.append(
                         f"{role.capitalize()} failed and was excluded from the consensus calculation."
                     )
 
-        if len(verifier_outputs) == 2 and needs_judge(*verifier_outputs):
+        judge_model_was_unstable = self.config.judge_model in initially_failed_verifier_models
+        if (
+            len(verifier_outputs) == 2
+            and needs_judge(*verifier_outputs)
+            and judge_model_was_unstable
+        ):
+            judge_limitations.append(
+                "The configured judge model failed during its initial verifier call, so it was "
+                "not called again; deterministic consensus was used."
+            )
+            self._emit(
+                "Judge skipped",
+                {
+                    "reason": "The configured judge model was unstable during verification.",
+                    "judge_model": self.config.judge_model,
+                },
+            )
+        elif len(verifier_outputs) == 2 and needs_judge(*verifier_outputs):
             verifier_1, verifier_2 = verifier_outputs
             self._emit(
                 "Disagreement detected",
@@ -585,11 +676,7 @@ class TextFactCheckPipeline:
         source_credibility: SourceCredibilityAssessment,
     ) -> tuple[VerifierOutput, list[Any], bool]:
         allowed_ids = {item.evidence_id for item in evidence}
-        payload = {
-            "claim": claim,
-            "evidence": [item.model_dump() for item in evidence],
-            "source_credibility_assessment": source_credibility.model_dump(),
-        }
+        payload = build_verifier_payload(claim, evidence, source_credibility)
         try:
             output, traces = self._call_json_validated(
                 step_name=step_name,
@@ -597,6 +684,7 @@ class TextFactCheckPipeline:
                 prompt_name=prompt_name,
                 payload=payload,
                 validator=lambda data: validate_verifier_output(data, allowed_ids),
+                max_tokens=4096,
             )
             return output.model_copy(update={"model_id": model_id}), traces, True
         except PipelineStepFailed as exc:
@@ -624,9 +712,7 @@ class TextFactCheckPipeline:
     ) -> tuple[VerifierOutput | None, list[Any], list[str]]:
         allowed_ids = {item.evidence_id for item in evidence}
         payload = {
-            "claim": claim,
-            "evidence": [item.model_dump() for item in evidence],
-            "source_credibility_assessment": source_credibility.model_dump(),
+            **build_verifier_payload(claim, evidence, source_credibility),
             "verifier_1": verifier_1.model_dump(),
             "verifier_2": verifier_2.model_dump(),
         }
@@ -637,6 +723,7 @@ class TextFactCheckPipeline:
                 prompt_name="disagreement_judge.txt",
                 payload=payload,
                 validator=lambda data: validate_verifier_output(data, allowed_ids),
+                max_tokens=4096,
             )
             limitations = []
             if not self.config.gonka_judge_model:
@@ -655,6 +742,7 @@ class TextFactCheckPipeline:
         prompt_name: str,
         payload: dict[str, Any],
         validator: Any,
+        max_tokens: int = 1024,
     ) -> tuple[Any, list[Any]]:
         traces = []
         prompt = load_prompt(prompt_name)
@@ -667,6 +755,7 @@ class TextFactCheckPipeline:
                     model_id=model_id,
                     prompt=prompt,
                     user_payload=current_payload,
+                    max_tokens=max_tokens,
                 )
                 traces.append(result.trace)
                 self._emit(
@@ -757,6 +846,13 @@ def validate_verifier_output(data: dict[str, Any], allowed_evidence_ids: set[str
                 f"{output.verdict!r}; expected {minimum}-{maximum}."
             )
     return output
+
+
+def traces_include_timeout(traces: list[Any]) -> bool:
+    return any(
+        "timeout" in f"{getattr(trace, 'error_type', '')} {getattr(trace, 'safe_error_message', '')}".lower()
+        for trace in traces
+    )
 
 
 def collect_evidence_ids(

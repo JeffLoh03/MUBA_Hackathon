@@ -41,6 +41,7 @@ const progressByStage: Record<string, number> = {
   "Verifier steps skipped": 94,
   "Disagreement detected": 91,
   "Judge completed": 94,
+  "Judge skipped": 94,
   "No judge needed": 94,
   "Consensus started": 96,
   "Consensus completed": 99,

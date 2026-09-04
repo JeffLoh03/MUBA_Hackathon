@@ -78,7 +78,7 @@ The current three-verifier setup is:
 ```env
 GONKA_BASE_URL=https://api.gonkarouter.io/v1
 GONKA_API_KEY=your-real-gonka-key
-GONKA_TIMEOUT_SECONDS=60
+GONKA_TIMEOUT_SECONDS=90
 
 GONKA_CLAIM_MODEL=moonshotai/Kimi-K2.6
 GONKA_VERIFY_MODEL_1=deepseek-ai/DeepSeek-V4-Flash-0731
@@ -92,6 +92,8 @@ TAVILY_API_KEY=
 ```
 
 Never send `.env` to anyone and never commit it to GitHub. It is already ignored by Git.
+
+`GONKA_TIMEOUT_SECONDS` is a hard wall-clock deadline for each model request. The 90-second default leaves room for reasoning models while preventing a slow provider from holding a review open indefinitely. Verifier and judge calls reserve Gonka's 4096-token output ceiling so reasoning tokens do not consume the space needed for the final JSON. The OpenAI SDK's automatic retries are disabled; the pipeline handles fallback and quorum recovery explicitly.
 
 ## Run The React App
 
@@ -116,7 +118,7 @@ Review modes:
 - `Quick review` accepts a short direct-text claim without an extra extraction call, uses compact deterministic search queries with common organization aliases, and retains up to 5 evidence sources.
 - `Professional review` asks the configured Gonka planning model for deeper queries and retains up to 12 evidence sources.
 
-Both modes run DeepSeek, Kimi and the configured fallback model concurrently. A failed model call is recorded in the audit trail and excluded from consensus rather than counted as an `Unverified` vote. If fewer than two decisive outputs return, failed models receive one parallel quorum-recovery attempt. At least two decisive model outputs are still required for a firm verdict. With three valid outputs, the deterministic consensus uses the median support score so one outlier cannot overturn two agreeing models. MiniMax improves availability, but its output alone is displayed as `Unverified` rather than treated as consensus.
+Both modes run DeepSeek, Kimi and the configured fallback model concurrently. A failed model call is recorded in the audit trail and excluded from consensus rather than counted as an `Unverified` vote. If fewer than two decisive outputs return, an API failure can receive one parallel quorum-recovery attempt; a model that already exhausted two format-validation attempts is not retried a second time. At least two decisive model outputs are still required for a firm verdict. With three valid outputs, the deterministic consensus uses the median support score so one outlier cannot overturn two agreeing models. A model that failed its initial verifier call is not immediately reused as the disagreement judge. MiniMax improves availability, but its output alone is displayed as `Unverified` rather than treated as consensus.
 
 For frontend development with instant React refresh, use two PowerShell windows.
 
@@ -172,7 +174,7 @@ With the local API running and your Gonka key configured, run the reusable real-
 python scripts\live_evaluation.py
 ```
 
-It checks Chinese and English claims, true and false cases, multiple source domains, and an invented claim that must remain `Unverified`. The secret-safe summary is written to `live_evaluation_results.json`.
+It checks 13 Chinese and English claims across true, false, misleading and unverified categories. A case passes only when the verdict is acceptable and its evidence, independent-source and verifier-quorum gates pass. Repeated runs also report verdict stability. The secret-safe `live_evaluation_results.json` file is checkpointed after every completed case, so an interrupted long run keeps its finished results.
 
 ## Architecture
 
@@ -181,11 +183,13 @@ It checks Chinese and English claims, true and false cases, multiple source doma
 - `pipeline/text_pipeline.py`: text/URL-to-report verification workflow with timeout fallback
 - `pipeline/image_pipeline.py`: image OCR, metadata and context-to-text workflow
 - `services/gonka_client.py`: Gonka calls, safe errors and request/trace capture
-- `services/search_provider.py`: DuckDuckGo or optional raw Tavily search
+- `services/search_provider.py`: DDGS metasearch with DuckDuckGo/Bing fallbacks, or optional Tavily
 - `services/evidence_processor.py`: page extraction, ranking and deduplication
 - `services/source_credibility.py`: website and source-risk assessment
 - `pipeline/consensus.py`: deterministic final verdict rules
 - `app.py`: legacy Streamlit fallback
+
+See `docs/ARCHITECTURE.md` for the complete request-to-report walkthrough.
 
 ## Boundaries
 

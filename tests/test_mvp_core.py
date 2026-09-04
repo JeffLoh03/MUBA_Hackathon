@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import io
+import json
 import threading
+import time
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
-from config import AppConfig
+from config import AppConfig, read_timeout_seconds
 from pipeline.consensus import build_consensus, needs_judge
 from pipeline.image_pipeline import ImageFactCheckPipeline
-from pipeline.text_pipeline import TextFactCheckPipeline, validate_verifier_output
+from pipeline.text_pipeline import TextFactCheckPipeline, build_verifier_payload, validate_verifier_output
 from schemas.models import ArticleContent, EvidenceItem, FactCheckReport, GonkaTraceRecord, SearchResult, VerifierOutput
 from services.article_extractor import URLSafetyError, validate_public_url
-from services.evidence_processor import EvidenceProcessor, dedupe_search_results, remove_near_duplicates
+from services.evidence_processor import (
+    EvidenceProcessor,
+    dedupe_search_results,
+    distinctive_claim_anchors,
+    remove_near_duplicates,
+)
 from services.gonka_client import (
     GonkaCallFailed,
     GonkaClient,
@@ -28,6 +36,8 @@ from services.image_processor import process_image
 from services.search_provider import (
     SearchProvider,
     SearchProviderError,
+    bing_search,
+    ddgs_search,
     deterministic_search_queries,
     duckduckgo_search,
 )
@@ -48,6 +58,12 @@ def make_config() -> AppConfig:
         tavily_api_key="",
         env_file_found=True,
     )
+
+
+def test_default_gonka_deadline_allows_slow_reasoning_models(monkeypatch):
+    monkeypatch.delenv("GONKA_TIMEOUT_SECONDS", raising=False)
+
+    assert read_timeout_seconds() == 90.0
 
 
 def make_trace(step: str, model: str = "model-a", success: bool = True) -> GonkaTraceRecord:
@@ -77,10 +93,12 @@ class FakeGonkaClient:
     def __init__(self, responses: dict[str, list[str]] | None = None) -> None:
         self.responses = responses or {}
         self.calls: list[tuple[str, str]] = []
+        self.max_tokens_by_step: dict[str, int] = {}
 
     def chat_json(self, *, step_name, model_id, prompt, user_payload, max_tokens=1024):
         base_step = step_name.replace("_retry", "").replace("_recovery", "")
         self.calls.append((step_name, model_id))
+        self.max_tokens_by_step[step_name] = max_tokens
         values = self.responses.get(base_step)
         if not values:
             raise AssertionError(f"No fake response configured for {base_step}")
@@ -130,6 +148,48 @@ class FailingFirstVerifierGonkaClient(FakeGonkaClient):
                 update={
                     "error_type": "APITimeoutError",
                     "safe_error_message": "Verifier timed out.",
+                }
+            )
+            raise GonkaCallFailed(error, trace)
+        return super().chat_json(
+            step_name=step_name,
+            model_id=model_id,
+            prompt=prompt,
+            user_payload=user_payload,
+            max_tokens=max_tokens,
+        )
+
+
+class TimeoutSecondVerifierGonkaClient(FakeGonkaClient):
+    def chat_json(self, *, step_name, model_id, prompt, user_payload, max_tokens=1024):
+        if step_name.startswith("verifier_2"):
+            self.calls.append((step_name, model_id))
+            error = GonkaClientError("Verifier timed out.", error_type="APITimeoutError")
+            trace = make_trace(step_name, model_id, success=False).model_copy(
+                update={
+                    "error_type": "APITimeoutError",
+                    "safe_error_message": "Verifier timed out.",
+                }
+            )
+            raise GonkaCallFailed(error, trace)
+        return super().chat_json(
+            step_name=step_name,
+            model_id=model_id,
+            prompt=prompt,
+            user_payload=user_payload,
+            max_tokens=max_tokens,
+        )
+
+
+class RecoveringJudgeModelGonkaClient(FakeGonkaClient):
+    def chat_json(self, *, step_name, model_id, prompt, user_payload, max_tokens=1024):
+        if step_name == "verifier_2":
+            self.calls.append((step_name, model_id))
+            error = GonkaClientError("Rate limited.", error_type="RateLimitError")
+            trace = make_trace(step_name, model_id, success=False).model_copy(
+                update={
+                    "error_type": "RateLimitError",
+                    "safe_error_message": "Rate limited.",
                 }
             )
             raise GonkaCallFailed(error, trace)
@@ -223,6 +283,15 @@ class FakeSearchProvider:
         return [SearchResult(title="Evidence", url="https://example.com/evidence", snippet="Evidence text")]
 
 
+class RecordingSearchProvider(FakeSearchProvider):
+    def __init__(self):
+        self.queries = []
+
+    def search_many(self, queries, max_results_per_query=4):
+        self.queries = list(queries)
+        return super().search_many(queries, max_results_per_query=max_results_per_query)
+
+
 class FailedSearchProvider:
     last_errors = ["DuckDuckGo search failed: HTTP 503"]
 
@@ -234,7 +303,7 @@ class FakeEvidenceProcessor:
     def __init__(self, evidence: list[EvidenceItem]) -> None:
         self.evidence = evidence
 
-    def build_evidence(self, search_results):
+    def build_evidence(self, search_results, *, claim=""):
         return self.evidence
 
 
@@ -389,10 +458,11 @@ def test_quick_pipeline_uses_deterministic_search_plan_without_gonka_call():
             ],
         }
     )
+    search_provider = RecordingSearchProvider()
     pipeline = TextFactCheckPipeline(
         make_config(),
         gonka,
-        FakeSearchProvider(),
+        search_provider,
         FakeEvidenceProcessor([evidence_item()]),
         use_ai_search_planning=False,
         use_ai_claim_extraction=False,
@@ -403,6 +473,7 @@ def test_quick_pipeline_uses_deterministic_search_plan_without_gonka_call():
     assert report.final_verdict == "True"
     assert not any(step.startswith("search_planning") for step, _ in gonka.calls)
     assert not any(step.startswith("claim_extraction") for step, _ in gonka.calls)
+    assert len(search_provider.queries) == 3
 
 
 def test_independent_verifiers_run_concurrently():
@@ -483,6 +554,7 @@ def test_duckduckgo_search_follows_redirects_and_parses_nasa_result(monkeypatch)
 
     def fake_get(url, **kwargs):
         assert kwargs["follow_redirects"] is True
+        assert "Mozilla/5.0" in kwargs["headers"]["User-Agent"]
         return FakeResponse()
 
     monkeypatch.setattr("services.search_provider.httpx.get", fake_get)
@@ -490,6 +562,73 @@ def test_duckduckgo_search_follows_redirects_and_parses_nasa_result(monkeypatch)
     results = duckduckgo_search("NASA confirms DART", max_results=3, timeout=12)
 
     assert [item.url for item in results] == ["https://www.nasa.gov/news-release/dart-result"]
+
+
+def test_search_provider_falls_back_to_bing_when_duckduckgo_is_challenged(monkeypatch):
+    provider = SearchProvider(make_config())
+    expected = SearchResult(
+        title="NASA DART result",
+        url="https://www.nasa.gov/news-release/dart-result",
+        snippet="NASA confirmed the orbit changed.",
+    )
+    monkeypatch.setattr("services.search_provider.ddgs_search", lambda *args: [])
+    monkeypatch.setattr("services.search_provider.duckduckgo_search", lambda *args: [])
+    monkeypatch.setattr("services.search_provider.bing_search", lambda *args: [expected])
+
+    assert provider.search("NASA DART", max_results=3) == [expected]
+
+
+def test_ddgs_search_maps_metasearch_results(monkeypatch):
+    class FakeDDGS:
+        def __init__(self, timeout):
+            assert timeout == 12
+
+        def text(self, query, **kwargs):
+            assert query == "NASA DART"
+            assert kwargs["backend"] == "auto"
+            return [
+                {
+                    "title": "NASA DART result",
+                    "href": "https://www.nasa.gov/dart",
+                    "body": "NASA confirmed the orbit changed.",
+                }
+            ]
+
+    monkeypatch.setattr("services.search_provider.DDGS", FakeDDGS)
+
+    results = ddgs_search("NASA DART", max_results=3, timeout=12)
+
+    assert results == [
+        SearchResult(
+            title="NASA DART result",
+            url="https://www.nasa.gov/dart",
+            snippet="NASA confirmed the orbit changed.",
+        )
+    ]
+
+
+def test_bing_search_parses_standard_results(monkeypatch):
+    html = """
+    <ol id="b_results">
+      <li class="b_algo">
+        <h2><a href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly93d3cubmFzYS5nb3Yv">NASA DART result</a></h2>
+        <div class="b_caption"><p>NASA confirmed the orbit changed.</p></div>
+      </li>
+    </ol>
+    """
+
+    class FakeResponse:
+        text = html
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("services.search_provider.httpx.get", lambda *args, **kwargs: FakeResponse())
+
+    results = bing_search("NASA DART", max_results=3, timeout=12)
+
+    assert results[0].url == "https://www.nasa.gov/"
+    assert results[0].snippet == "NASA confirmed the orbit changed."
 
 
 def test_search_many_records_provider_failures(monkeypatch):
@@ -502,6 +641,23 @@ def test_search_many_records_provider_failures(monkeypatch):
 
     assert provider.search_many(["query one", "query two"]) == []
     assert len(provider.last_errors) == 2
+
+
+def test_search_many_runs_independent_queries_concurrently(monkeypatch):
+    provider = SearchProvider(make_config())
+
+    def slow_search(query, max_results=5):
+        time.sleep(0.15)
+        return [SearchResult(title=query, url=f"https://example.com/{query}", snippet=query)]
+
+    monkeypatch.setattr(provider, "search", slow_search)
+
+    started = time.perf_counter()
+    results = provider.search_many(["one", "two", "three"], max_results_per_query=1)
+    elapsed = time.perf_counter() - started
+
+    assert [result.title for result in results] == ["one", "two", "three"]
+    assert elapsed < 0.35
 
 
 def test_evidence_uses_search_snippet_when_article_dns_resolution_fails(monkeypatch):
@@ -524,6 +680,137 @@ def test_evidence_uses_search_snippet_when_article_dns_resolution_fails(monkeypa
     assert evidence[0].root_domain == "nasa.gov"
     assert evidence[0].source_type == "official_government"
     assert "changed the asteroid's orbit" in evidence[0].excerpt
+
+
+def test_evidence_processor_rejects_results_missing_a_distinctive_claim_anchor(monkeypatch):
+    def fail_extract(url):
+        raise URLSafetyError("Offline test uses search snippets.")
+
+    monkeypatch.setattr("services.evidence_processor.extract_article", fail_extract)
+    claim = "The Zorbax Institute published a clinical trial about diabetes."
+    evidence = EvidenceProcessor(max_evidence=3).build_evidence(
+        [
+            SearchResult(
+                title="ClinicalTrials.gov",
+                url="https://clinicaltrials.gov/",
+                snippet="A registry of publicly and privately supported clinical studies.",
+            ),
+            SearchResult(
+                title="Zorbax Institute trial questioned",
+                url="https://reuters.com/world/zorbax-trial",
+                snippet="No record supports the claimed Zorbax Institute diabetes trial.",
+            ),
+        ],
+        claim=claim,
+    )
+
+    assert [item.root_domain for item in evidence] == ["reuters.com"]
+
+
+def test_evidence_processor_fetches_candidate_pages_concurrently(monkeypatch):
+    def slow_extract(url):
+        time.sleep(0.15)
+        return ArticleContent(url=url, title=url, text=f"Evidence from {url}")
+
+    monkeypatch.setattr("services.evidence_processor.extract_article", slow_extract)
+    results = [
+        SearchResult(title="One", url="https://reuters.com/one", snippet="one"),
+        SearchResult(title="Two", url="https://apnews.com/two", snippet="two"),
+        SearchResult(title="Three", url="https://nasa.gov/three", snippet="three"),
+    ]
+
+    started = time.perf_counter()
+    evidence = EvidenceProcessor(max_evidence=3).build_evidence(results)
+    elapsed = time.perf_counter() - started
+
+    assert len(evidence) == 3
+    assert elapsed < 0.35
+
+
+def test_claim_anchor_normalizes_english_possessives():
+    assert "malaysia" in distinctive_claim_anchors("Malaysia's official currency is the ringgit.")
+
+
+def test_claim_anchors_find_latin_acronyms_next_to_chinese_text():
+    anchors = distinctive_claim_anchors("美国国家航空航天局证实，NASA的DART任务改变了轨道。")
+
+    assert anchors == ("nasa", "dart")
+
+
+def test_evidence_with_multiple_claim_anchors_rejects_topic_only_pages(monkeypatch):
+    def fail_extract(url):
+        raise URLSafetyError("Offline test uses search snippets.")
+
+    monkeypatch.setattr("services.evidence_processor.extract_article", fail_extract)
+    evidence = EvidenceProcessor(max_evidence=3).build_evidence(
+        [
+            SearchResult(
+                title="NASA homepage",
+                url="https://www.nasa.gov/",
+                snippet="NASA missions and agency news.",
+            ),
+            SearchResult(
+                title="NASA DART changed an asteroid orbit",
+                url="https://science.nasa.gov/dart-result/",
+                snippet="NASA confirmed DART changed the orbit of Dimorphos.",
+            ),
+        ],
+        claim="NASA confirms its DART mission changed an asteroid's orbit.",
+    )
+
+    assert [item.url for item in evidence] == ["https://science.nasa.gov/dart-result/"]
+
+
+def test_verifier_payload_is_compact_and_keeps_auditable_evidence_fields():
+    evidence = evidence_item(excerpt="x" * 1200)
+    payload = build_verifier_payload(
+        "A test claim",
+        [evidence],
+        assess_source_credibility([evidence]),
+    )
+
+    assert set(payload["evidence"][0]) == {
+        "id",
+        "title",
+        "domain",
+        "publisher",
+        "published_date",
+        "excerpt",
+        "source_type",
+        "source_quality",
+    }
+    assert len(payload["evidence"][0]["excerpt"]) == 700
+    assert "url" not in payload["evidence"][0]
+    assert "retrieved_at" not in payload["evidence"][0]
+
+
+def test_verifier_uses_full_gonka_reasoning_output_budget():
+    gonka = FakeGonkaClient(
+        {
+            "verifier_1": [
+                '{"verdict":"true","support_score":90,"confidence":80,"supporting_evidence":["E1"],"contradicting_evidence":[],"context_mismatch":false,"reasoning_summary":"Supported.","missing_information":[]}'
+            ]
+        }
+    )
+    evidence = evidence_item()
+    pipeline = TextFactCheckPipeline(
+        make_config(),
+        gonka,
+        FakeSearchProvider(),
+        FakeEvidenceProcessor([evidence]),
+    )
+
+    _, _, succeeded = pipeline._verify_with_model(
+        step_name="verifier_1",
+        model_id="model-a",
+        prompt_name="evidence_verifier.txt",
+        claim="A test claim",
+        evidence=[evidence],
+        source_credibility=assess_source_credibility([evidence]),
+    )
+
+    assert succeeded is True
+    assert gonka.max_tokens_by_step["verifier_1"] == 4096
 
 
 def test_text_pipeline_reports_search_outage_as_a_limitation():
@@ -608,6 +895,7 @@ def test_one_remaining_verifier_is_not_enough_for_a_firm_verdict():
     assert report.final_verdict == "Unverified"
     assert len(report.verifier_outputs) == 1
     assert report.verifier_outputs[0].model_id == "model-b"
+    assert [step for step, _ in gonka.calls if step.startswith("verifier_1")] == ["verifier_1"]
     assert any("Verifier 1 failed" in item for item in report.limitations)
 
 
@@ -882,6 +1170,40 @@ def test_inconsistent_verifier_output_is_retried_before_consensus():
     assert ("verifier_1_retry", "model-a") in gonka.calls
 
 
+def test_exhausted_format_retries_do_not_trigger_a_second_recovery_layer():
+    invalid = (
+        '{"verdict":"true","support_score":5,"confidence":5,'
+        '"supporting_evidence":["E1"],"contradicting_evidence":[],'
+        '"context_mismatch":false,"reasoning_summary":"Invalid score.",'
+        '"missing_information":[]}'
+    )
+    gonka = FakeGonkaClient(
+        {
+            "verifier_1": [invalid, invalid],
+            "verifier_2": [
+                '{"verdict":"true","support_score":90,"confidence":80,"supporting_evidence":["E1"],"contradicting_evidence":[],"context_mismatch":false,"reasoning_summary":"Supported.","missing_information":[]}'
+            ],
+        }
+    )
+    pipeline = TextFactCheckPipeline(
+        make_config(),
+        gonka,
+        FakeSearchProvider(),
+        FakeEvidenceProcessor([evidence_item()]),
+        use_ai_search_planning=False,
+        use_ai_claim_extraction=False,
+    )
+
+    report = pipeline.verify(text="A test claim.")
+
+    assert report.final_verdict == "Unverified"
+    assert [step for step, _ in gonka.calls if step.startswith("verifier_1")] == [
+        "verifier_1",
+        "verifier_1_retry",
+    ]
+    assert any("format validation" in item for item in report.limitations)
+
+
 def test_two_agreeing_models():
     result = build_consensus([verifier(), verifier(support_score=92, confidence=70)], [evidence_item()])
 
@@ -1025,6 +1347,18 @@ def test_one_context_mismatch_does_not_overturn_two_matching_reviews():
     assert result.final_verdict == "True"
 
 
+def test_mixed_support_score_uses_consistent_misleading_label():
+    result = build_consensus(
+        [
+            verifier(verdict="misleading", support_score=58, confidence=80),
+            verifier(verdict="misleading", support_score=62, confidence=78),
+        ],
+        [evidence_item()],
+    )
+
+    assert result.final_verdict == "Misleading"
+
+
 def test_deterministic_search_removes_reporting_language_from_false_claim():
     queries = deterministic_search_queries(
         "NASA confirms its DART mission made the asteroid Dimorphos a threat to Earth."
@@ -1039,8 +1373,13 @@ def test_deterministic_search_preserves_chinese_claim_text():
 
     queries = deterministic_search_queries(claim)
 
-    assert "NASA" in queries.general_query
-    assert "DART" in queries.general_query
+    assert queries.general_query == "NASA DART"
+
+
+def test_deterministic_search_uses_english_alias_for_chandrayaan():
+    queries = deterministic_search_queries("印度的月船3号于2023年8月23日成功软着陆。")
+
+    assert queries.general_query.startswith("Chandrayaan-3 2023")
 
 
 def test_deterministic_search_limits_long_claim_queries():
@@ -1054,39 +1393,113 @@ def test_deterministic_search_limits_long_claim_queries():
 
 def test_gonka_chat_uses_deterministic_temperature():
     captured = {}
+    response_body = json.dumps(
+        {
+            "id": "response-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "model-a",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    ).encode("utf-8")
 
-    class FakeRawResponse:
-        headers = {}
+    class CaptureRequestHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            content_length = int(self.headers.get("Content-Length", "0"))
+            captured.update(json.loads(self.rfile.read(content_length)))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
 
-        def parse(self):
-            return SimpleNamespace(
-                id="response-1",
-                model="model-a",
-                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
-                usage=None,
-            )
+        def log_message(self, format, *args):
+            return
 
-    def create(**kwargs):
-        captured.update(kwargs)
-        return FakeRawResponse()
-
-    client = GonkaClient.__new__(GonkaClient)
-    client._secrets = []
-    client.client = SimpleNamespace(
-        chat=SimpleNamespace(
-            completions=SimpleNamespace(
-                with_raw_response=SimpleNamespace(create=create),
-            )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CaptureRequestHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    client = GonkaClient(
+        replace(make_config(), gonka_base_url=f"http://127.0.0.1:{server.server_port}/v1"),
+        timeout=1,
+    )
+    try:
+        client.chat(
+            step_name="test",
+            model_id="model-a",
+            messages=[{"role": "user", "content": "test"}],
         )
-    )
-
-    client.chat(
-        step_name="test",
-        model_id="model-a",
-        messages=[{"role": "user", "content": "test"}],
-    )
+    finally:
+        server.shutdown()
+        server.server_close()
 
     assert captured["temperature"] == 0.0
+
+
+def test_gonka_chat_enforces_total_request_deadline():
+    response_body = json.dumps(
+        {
+            "id": "response-slow",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "model-a",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "too late"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    ).encode("utf-8")
+
+    class SlowResponseHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            try:
+                for byte in response_body:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.01)
+            except OSError:
+                pass
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowResponseHandler)
+    server.daemon_threads = True
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}/v1"
+    client = GonkaClient(replace(make_config(), gonka_base_url=base_url), timeout=0.1)
+
+    started = time.perf_counter()
+    try:
+        with pytest.raises(GonkaCallFailed) as captured:
+            client.chat(
+                step_name="deadline_test",
+                model_id="model-a",
+                messages=[{"role": "user", "content": "test"}],
+            )
+    finally:
+        elapsed = time.perf_counter() - started
+        server.shutdown()
+        server.server_close()
+
+    assert elapsed < 0.75
+    assert captured.value.trace.success is False
+    assert "timeout" in str(captured.value).lower()
 
 
 def test_two_disagreeing_models_trigger_judge():
@@ -1098,6 +1511,65 @@ def test_unverified_vote_does_not_trigger_slow_judge_call():
         verifier(verdict="false", support_score=0, support=[], contradict=["E1"]),
         verifier(verdict="unverified", support_score=50, confidence=40, support=[]),
     )
+
+
+def test_timed_out_verifier_model_is_not_called_again_as_judge():
+    config = replace(
+        make_config(),
+        gonka_judge_model="model-b",
+        gonka_fallback_model="model-fallback",
+    )
+    gonka = TimeoutSecondVerifierGonkaClient(
+        {
+            "verifier_1": [
+                '{"verdict":"misleading","support_score":55,"confidence":85,"supporting_evidence":["E1"],"contradicting_evidence":[],"context_mismatch":true,"reasoning_summary":"Context differs.","missing_information":[]}'
+            ],
+            "verifier_fallback": [
+                '{"verdict":"false","support_score":15,"confidence":90,"supporting_evidence":[],"contradicting_evidence":["E1"],"context_mismatch":false,"reasoning_summary":"Contradicted.","missing_information":[]}'
+            ],
+        }
+    )
+    pipeline = TextFactCheckPipeline(
+        config,
+        gonka,
+        FakeSearchProvider(),
+        FakeEvidenceProcessor([evidence_item()]),
+        use_ai_search_planning=False,
+        use_ai_claim_extraction=False,
+    )
+
+    report = pipeline.verify(text="A disputed claim.")
+
+    assert not any(step == "disagreement_judge" for step, _ in gonka.calls)
+    assert any("failed during its initial verifier call" in item for item in report.limitations)
+
+
+def test_recovered_verifier_model_is_not_immediately_reused_as_judge():
+    config = replace(make_config(), gonka_judge_model="model-b")
+    gonka = RecoveringJudgeModelGonkaClient(
+        {
+            "verifier_1": [
+                '{"verdict":"misleading","support_score":55,"confidence":85,"supporting_evidence":["E1"],"contradicting_evidence":[],"context_mismatch":true,"reasoning_summary":"Context differs.","missing_information":[]}'
+            ],
+            "verifier_2": [
+                '{"verdict":"false","support_score":15,"confidence":90,"supporting_evidence":[],"contradicting_evidence":["E1"],"context_mismatch":false,"reasoning_summary":"Contradicted.","missing_information":[]}'
+            ],
+        }
+    )
+    pipeline = TextFactCheckPipeline(
+        config,
+        gonka,
+        FakeSearchProvider(),
+        FakeEvidenceProcessor([evidence_item()]),
+        use_ai_search_planning=False,
+        use_ai_claim_extraction=False,
+    )
+
+    report = pipeline.verify(text="A disputed claim.")
+
+    assert ("verifier_2_recovery", "model-b") in gonka.calls
+    assert not any(step == "disagreement_judge" for step, _ in gonka.calls)
+    assert any("failed during its initial verifier call" in item for item in report.limitations)
 
 
 def test_insufficient_evidence_produces_unverified():

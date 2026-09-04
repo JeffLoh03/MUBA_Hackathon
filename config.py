@@ -28,7 +28,7 @@ class AppConfig:
     search_provider: str
     tavily_api_key: str
     env_file_found: bool
-    gonka_timeout_seconds: float = 60.0
+    gonka_timeout_seconds: float = 90.0
     gonka_fallback_model: str = ""
 
     @property
@@ -100,7 +100,7 @@ def validate_base_url(base_url: str) -> None:
 
 
 def read_timeout_seconds() -> float:
-    raw_value = os.getenv("GONKA_TIMEOUT_SECONDS", "60").strip()
+    raw_value = os.getenv("GONKA_TIMEOUT_SECONDS", "90").strip()
     try:
         timeout = float(raw_value)
     except ValueError as exc:

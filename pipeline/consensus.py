@@ -194,7 +194,7 @@ def category_for_score(score: int) -> str:
     if score >= 70:
         return "Mostly True"
     if score >= 45:
-        return "Misleading or Mixed"
+        return "Misleading"
     if score >= 25:
         return "Mostly False"
     return "False"

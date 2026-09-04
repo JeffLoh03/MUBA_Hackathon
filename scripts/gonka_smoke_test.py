@@ -181,6 +181,11 @@ def print_results_table(results: list[dict[str, Any]]) -> None:
     print(format_row(["-" * width for width in widths], widths))
     for row in rows:
         print(format_row(row, widths))
+    warnings = [item for item in results if item.get("warning")]
+    if warnings:
+        print("\nWarnings:")
+        for item in warnings:
+            print(f"- {item['requested_model_id']}: {item['warning']}")
 
 
 def save_results(base_url: str, mode: str, results: list[dict[str, Any]], secrets: list[str]) -> None:

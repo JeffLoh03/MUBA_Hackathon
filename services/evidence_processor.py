@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urldefrag
 
@@ -10,6 +12,20 @@ from services.article_extractor import ArticleFetchError, URLSafetyError, extrac
 from services.source_ranker import classify_source, publisher_from_url, root_domain
 
 
+ANCHOR_STOP_WORDS = {
+    "a",
+    "an",
+    "federation",
+    "government",
+    "health",
+    "institute",
+    "organization",
+    "the",
+    "university",
+    "world",
+}
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -18,19 +34,34 @@ class EvidenceProcessor:
     def __init__(self, max_evidence: int = 8) -> None:
         self.max_evidence = max_evidence
 
-    def build_evidence(self, search_results: list[SearchResult]) -> list[EvidenceItem]:
+    def build_evidence(
+        self,
+        search_results: list[SearchResult],
+        *,
+        claim: str = "",
+    ) -> list[EvidenceItem]:
         unique_results = dedupe_search_results(search_results)
+        anchors = distinctive_claim_anchors(claim)
         fetch_limit = max(self.max_evidence * 2, 8)
         ranked_results = sorted(
             unique_results,
-            key=lambda result: classify_source(result.url)[1],
+            key=lambda result: (
+                search_result_anchor_matches(result, anchors),
+                classify_source(result.url)[1],
+            ),
             reverse=True,
         )[:fetch_limit]
         candidates: list[EvidenceItem] = []
-        for result in ranked_results:
-            evidence = self._result_to_evidence(result)
-            if evidence is not None:
-                candidates.append(evidence)
+        if ranked_results:
+            with ThreadPoolExecutor(
+                max_workers=min(5, len(ranked_results)),
+                thread_name_prefix="verity-evidence",
+            ) as executor:
+                futures = [executor.submit(self._result_to_evidence, result) for result in ranked_results]
+                for future in futures:
+                    evidence = future.result()
+                    if evidence is not None and evidence_mentions_anchor(evidence, anchors):
+                        candidates.append(evidence)
 
         deduped = remove_near_duplicates(candidates)
         ranked = sorted(deduped, key=lambda item: item.source_quality, reverse=True)
@@ -123,6 +154,35 @@ def relabel_evidence(items: list[EvidenceItem]) -> list[EvidenceItem]:
 def normalize_excerpt(text: str, max_chars: int = 1200) -> str:
     clean = " ".join((text or "").split())
     return clean[:max_chars]
+
+
+def distinctive_claim_anchors(claim: str) -> tuple[str, ...]:
+    anchors = []
+    for token in re.findall(
+        r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9'-]{1,}(?![A-Za-z0-9])",
+        claim,
+    ):
+        normalized = token.casefold().removesuffix("'s")
+        if normalized in ANCHOR_STOP_WORDS:
+            continue
+        if any(character.isupper() for character in token) and normalized not in anchors:
+            anchors.append(normalized)
+    return tuple(anchors)
+
+
+def search_result_anchor_matches(result: SearchResult, anchors: tuple[str, ...]) -> int:
+    if not anchors:
+        return 0
+    haystack = " ".join((result.title, result.snippet, result.raw_content, result.url)).casefold()
+    return sum(anchor in haystack for anchor in anchors)
+
+
+def evidence_mentions_anchor(item: EvidenceItem, anchors: tuple[str, ...]) -> bool:
+    if not anchors:
+        return True
+    haystack = " ".join((item.title, item.excerpt, item.publisher, item.url)).casefold()
+    required_matches = min(2, len(anchors))
+    return sum(anchor in haystack for anchor in anchors) >= required_matches
 
 
 def split_evidence_by_model_outputs(
