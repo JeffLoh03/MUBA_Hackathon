@@ -1,0 +1,17 @@
+streamlit>=1.35.0
+openai>=1.0.0
+pydantic>=2.0.0
+httpx>=0.25.0
+python-dotenv>=1.0.0
+trafilatura>=1.9.0
+lxml_html_clean>=0.4.0
+beautifulsoup4>=4.12.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
+tldextract>=5.0.0
+rapidfuzz>=3.6.0
+playwright>=1.45.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pytest>=8.0.0

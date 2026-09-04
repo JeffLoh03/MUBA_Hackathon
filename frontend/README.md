@@ -1,28 +1,19 @@
 # Verity Desk Frontend
 
-Local React, Vite, and TypeScript prototype for evidence-led news verification. It uses mock data to simulate the DeepSeek, Kimi, MiniMax, and rule-engine workflow.
+React, TypeScript and Vite frontend based directly on the team's `MUBA_Hackathon` code.
 
-## Structure
+The original mock timer and sample report have been replaced with the real Python stream at `/api/verify/stream`. Keep the FastAPI backend on port `8000` while developing:
 
-- `src/components/` - reusable interface and workflow components
-- `src/pages/` - route-level pages
-- `src/hooks/` - verification progress and state
-- `src/data/` - mock verification results
-- `src/types/` - shared TypeScript contracts
-- `public/` - static assets
+The composer accepts text claims, article URLs, and JPG/PNG/WEBP image attachments. Image requests use `/api/verify/image/stream` and remain in memory only.
 
-## Development
-
-```bash
+```powershell
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Validation:
 
-## Validation
-
-```bash
+```powershell
 npm run lint
 npm run build
 ```
