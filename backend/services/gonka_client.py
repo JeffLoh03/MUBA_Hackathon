@@ -12,8 +12,8 @@ from typing import Any
 import httpx
 from openai import OpenAI
 
-from config import AppConfig
-from schemas.models import GonkaTraceRecord
+from backend.config import AppConfig
+from backend.schemas.models import GonkaTraceRecord
 
 
 TRACE_HEADER_CANDIDATES = (

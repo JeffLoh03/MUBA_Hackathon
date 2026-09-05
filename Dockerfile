@@ -23,6 +23,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 COPY --from=frontend-build /frontend/dist /app/frontend/dist
 
+RUN mkdir -p /app/data
+VOLUME ["/app/data"]
+
 EXPOSE 8000
 
-CMD ["uvicorn", "api:app", "--host=0.0.0.0", "--port=8000"]
+CMD ["uvicorn", "backend.api:app", "--host=0.0.0.0", "--port=8000", "--no-proxy-headers"]

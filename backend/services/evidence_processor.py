@@ -5,9 +5,9 @@ from urllib.parse import urldefrag
 
 from rapidfuzz import fuzz
 
-from schemas.models import EvidenceItem, SearchResult
-from services.article_extractor import ArticleFetchError, URLSafetyError, extract_article
-from services.source_ranker import classify_source, publisher_from_url, root_domain
+from backend.schemas.models import EvidenceItem, SearchResult
+from backend.services.article_extractor import ArticleFetchError, URLSafetyError, extract_article
+from backend.services.source_ranker import classify_source, publisher_from_url, root_domain
 
 
 def utc_now_iso() -> str:

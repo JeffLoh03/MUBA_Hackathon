@@ -10,6 +10,8 @@ Return strict JSON only:
 
 Rules:
 - Extract up to three concrete factual claims that can be checked against evidence.
+- Translate every extracted claim into clear English, even when the input is in another language. Preserve names, dates, numbers, places, and the original meaning.
 - Prefer claims with dates, places, named people, organizations, numbers, events, or policies.
 - If the text is only opinion, advice, speculation, prediction, satire, or a personal preference, return an empty claims list and explain briefly in not_verifiable_reason.
+- Write not_verifiable_reason in English.
 - Do not include private chain-of-thought.

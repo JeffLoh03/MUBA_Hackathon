@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from schemas.models import EvidenceItem, SourceCredibilityAssessment
+from backend.schemas.models import EvidenceItem, SourceCredibilityAssessment
 
 
 HIGH_QUALITY_THRESHOLD = 0.7

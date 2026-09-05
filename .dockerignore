@@ -1,0 +1,17 @@
+.env
+.git
+.github
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+frontend/node_modules/
+frontend/dist/
+.runtime/
+tmp/
+uploaded_images/
+test_results.json
+live_evaluation_results.json
+data/

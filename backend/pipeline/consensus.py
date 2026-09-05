@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from statistics import median
 
-from schemas.models import EvidenceItem, SourceCredibilityAssessment, VerifierOutput
+from backend.schemas.models import EvidenceItem, SourceCredibilityAssessment, VerifierOutput
 
 
 VERDICT_ORDER = {

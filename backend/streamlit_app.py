@@ -5,14 +5,14 @@ from typing import Any
 
 import streamlit as st
 
-from config import ConfigError, load_config
-from pipeline.image_pipeline import ImageFactCheckPipeline
-from pipeline.text_pipeline import PipelineConfigError, TextFactCheckPipeline
-from schemas.models import EvidenceItem, FactCheckReport
-from services.gonka_client import GonkaClient, GonkaClientError, redact_secrets
-from services.model_discovery import discover_models
-from services.search_provider import SearchProvider
-from services.visible_browser import VisibleBrowserDemo, VisibleBrowserError
+from backend.config import ConfigError, load_config
+from backend.pipeline.image_pipeline import ImageFactCheckPipeline
+from backend.pipeline.text_pipeline import PipelineConfigError, TextFactCheckPipeline
+from backend.schemas.models import EvidenceItem, FactCheckReport
+from backend.services.gonka_client import GonkaClient, GonkaClientError, redact_secrets
+from backend.services.model_discovery import discover_models
+from backend.services.search_provider import SearchProvider
+from backend.services.visible_browser import VisibleBrowserDemo, VisibleBrowserError
 
 
 st.set_page_config(

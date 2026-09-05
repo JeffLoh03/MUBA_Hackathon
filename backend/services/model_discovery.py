@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.gonka_client import GonkaClient
+from backend.services.gonka_client import GonkaClient
 
 
 def discover_models(client: GonkaClient) -> list[str]:

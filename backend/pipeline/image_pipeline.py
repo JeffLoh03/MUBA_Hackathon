@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from schemas.models import FactCheckReport, ImageContextAssessment
-from services.gonka_client import GonkaCallFailed, GonkaClient, parse_json_object
-from services.image_processor import ProcessedImage, process_image
-from pipeline.text_pipeline import TextFactCheckPipeline
+from backend.schemas.models import FactCheckReport, ImageContextAssessment
+from backend.services.gonka_client import GonkaCallFailed, GonkaClient, parse_json_object
+from backend.services.image_processor import ProcessedImage, process_image
+from backend.pipeline.text_pipeline import TextFactCheckPipeline
 
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
@@ -132,7 +132,16 @@ class ImageFactCheckPipeline:
             )
 
         report = self.text_pipeline.verify(text=combined_text)
-        image_verdict = derive_image_verdict(report.final_verdict)
+        image_verdict = (
+            "Multiple claims reviewed"
+            if report.claim_reports
+            else derive_image_verdict(report.final_verdict)
+        )
+        if report.claim_reports:
+            limitations.append(
+                "The image contains multiple extracted claims. Each claim has its own context "
+                "assessment; no combined image truth verdict is issued."
+            )
         assessment = ImageContextAssessment(
             verdict=image_verdict,
             ocr_text=processed.ocr_text,
@@ -141,8 +150,20 @@ class ImageFactCheckPipeline:
             visual_description=visual_description,
             limitations=limitations + ([processed.ocr_error] if processed.ocr_error else []),
         )
+        claim_reports = [
+            child.model_copy(
+                update={
+                    "image_context_assessment": assessment.model_copy(
+                        update={"verdict": derive_image_verdict(child.final_verdict)}
+                    ),
+                    "limitations": child.limitations + assessment.limitations,
+                }
+            )
+            for child in report.claim_reports
+        ]
         return report.model_copy(
             update={
+                "claim_reports": claim_reports,
                 "image_context_assessment": assessment,
                 "gonka_trace": traces + report.gonka_trace,
                 "limitations": report.limitations + assessment.limitations,

@@ -13,6 +13,7 @@ Return strict JSON only:
 
 Rules:
 - Describe visible content neutrally.
+- Write visual_description, clues, inconsistencies, and context_claims in clear English. Keep visible_text as the exact text visible in the image.
 - Extract visible text if present.
 - Note possible location, date, weather, event, signage, uniforms, landmarks, or document clues.
 - Treat missing EXIF as neutral.

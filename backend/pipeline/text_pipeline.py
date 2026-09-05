@@ -1,37 +1,45 @@
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from config import AppConfig
-from pipeline.consensus import build_consensus, needs_judge
-from schemas.models import (
+from backend.config import AppConfig
+from backend.pipeline.consensus import build_consensus, needs_judge
+from backend.schemas.models import (
     ArticleContent,
     ClaimExtraction,
+    DeepReview,
+    EvidenceGapPlan,
     EvidenceItem,
     FactCheckReport,
+    GonkaTraceRecord,
     SearchQueries,
     SourceCredibilityAssessment,
     VerifierOutput,
 )
-from services.article_extractor import ArticleFetchError, URLSafetyError, extract_article
-from services.evidence_processor import (
+from backend.services.article_extractor import ArticleFetchError, URLSafetyError, extract_article
+from backend.services.evidence_processor import (
     EvidenceProcessor,
     normalize_excerpt,
     relabel_evidence,
     remove_near_duplicates,
     split_evidence_by_model_outputs,
 )
-from services.gonka_client import GonkaCallFailed, GonkaClient, load_prompt, parse_json_object
-from services.search_provider import SearchProvider, deterministic_search_queries
-from services.source_credibility import assess_source_credibility
-from services.source_ranker import classify_source, publisher_from_url, root_domain
+from backend.services.gonka_client import GonkaCallFailed, GonkaClient, load_prompt, parse_json_object
+from backend.services.search_provider import SearchProvider, deterministic_search_queries
+from backend.services.source_credibility import assess_source_credibility
+from backend.services.source_ranker import classify_source, publisher_from_url, root_domain
 
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
+NON_ENGLISH_SCRIPT_PATTERN = re.compile(
+    r"[\u0370-\u052f\u0590-\u08ff\u0900-\u0fff\u3040-\u30ff"
+    r"\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]"
+)
 
 
 class PipelineConfigError(Exception):
@@ -56,6 +64,7 @@ class TextFactCheckPipeline:
         max_results_per_query: int = 4,
         use_ai_search_planning: bool = True,
         use_ai_claim_extraction: bool = True,
+        enable_deep_review: bool = False,
     ) -> None:
         self.config = config
         self.gonka_client = gonka_client
@@ -66,6 +75,9 @@ class TextFactCheckPipeline:
         self.max_results_per_query = max(1, max_results_per_query)
         self.use_ai_search_planning = use_ai_search_planning
         self.use_ai_claim_extraction = use_ai_claim_extraction
+        self.enable_deep_review = enable_deep_review
+        self._claim_context: dict[str, Any] = {}
+        self._current_claim_traces: list[GonkaTraceRecord] | None = None
 
     def verify(self, *, text: str = "", article_url: str = "") -> FactCheckReport:
         self._ensure_ready()
@@ -97,6 +109,8 @@ class TextFactCheckPipeline:
             and not article_url.strip()
             and len(text.strip()) <= 500
             and "\n" not in text.strip()
+            and not NON_ENGLISH_SCRIPT_PATTERN.search(text)
+            and not re.search(r"[.!?;]\s+\S|[。！？；]\S", text.strip())
         )
         self._emit(
             "Claim extraction started",
@@ -119,11 +133,20 @@ class TextFactCheckPipeline:
             )
         traces.extend(extraction_traces)
         setup_limitations.extend(extraction_limitations)
+        unique_claims = unique_extracted_claims(extraction.claims)
+        extraction.claims = unique_claims[:3]
+        unreviewed_claims = unique_claims[3:]
+        if unreviewed_claims:
+            setup_limitations.append(
+                f"The review is limited to three unique claims; {len(unreviewed_claims)} additional "
+                "extracted claim(s) were not reviewed."
+            )
         self._emit(
             "Claim extraction completed",
             {
                 "claims": extraction.claims,
                 "not_verifiable_reason": extraction.not_verifiable_reason,
+                "unreviewed_claims": unreviewed_claims,
             },
         )
         if not extraction.claims:
@@ -140,7 +163,92 @@ class TextFactCheckPipeline:
                 limitations=setup_limitations,
             )
 
-        claim = extraction.claims[0]
+        if len(extraction.claims) == 1:
+            return self._verify_claim(
+                extraction.claims[0],
+                setup_limitations=list(setup_limitations),
+                source_article=source_article,
+                traces=traces,
+            )
+
+        claim_reports: list[FactCheckReport] = []
+        for index, claim in enumerate(extraction.claims, start=1):
+            self._claim_context = {
+                "claim_index": index,
+                "claim_count": len(extraction.claims),
+                "claim": claim,
+            }
+            self._current_claim_traces = []
+            self._emit("Claim review started", {"claim_count": len(extraction.claims)})
+            try:
+                claim_report = self._verify_claim(
+                    claim,
+                    setup_limitations=[],
+                    source_article=source_article,
+                    traces=[],
+                )
+            except Exception as exc:
+                # Keep completed reviews and continue to the next independent claim.
+                # Exception messages can include provider internals; expose only its type.
+                self._emit("Claim review failed", {"error_type": type(exc).__name__})
+                claim_report = FactCheckReport(
+                    extracted_claim=claim,
+                    extracted_claims=[claim],
+                    final_verdict="Unverified",
+                    truth_score=50,
+                    confidence_score=0,
+                    concise_explanation="This claim could not be reviewed because a processing step failed.",
+                    review_status="failed",
+                    limitations=[f"Claim review failed ({type(exc).__name__}); no truth verdict was issued."],
+                    gonka_trace=list(self._current_claim_traces),
+                )
+            finally:
+                self._current_claim_traces = None
+            traces.extend(claim_report.gonka_trace)
+            # The parent owns the call ledger. Evidence IDs remain local to each child.
+            claim_reports.append(claim_report.model_copy(update={"gonka_trace": []}))
+            self._emit(
+                "Claim review completed",
+                {"final_verdict": claim_report.final_verdict, "review_status": claim_report.review_status},
+            )
+            self._claim_context = {}
+
+        failed_count = sum(report.review_status == "failed" for report in claim_reports)
+        completed_count = len(claim_reports) - failed_count
+        setup_limitations.append(
+            "Only the listed claims were reviewed, with a maximum of three per submission. "
+            "Additional claims in the original input may not have been extracted. "
+            "Evidence IDs are scoped to each claim; scores are not combined into an article truth score."
+        )
+        if failed_count:
+            setup_limitations.append(f"{failed_count} claim review(s) failed and remain unverified.")
+        return FactCheckReport(
+            extracted_claim="Multiple claims reviewed",
+            extracted_claims=extraction.claims,
+            claim_reports=claim_reports,
+            unreviewed_claims=unreviewed_claims,
+            review_status="partial" if failed_count or unreviewed_claims else "completed",
+            final_verdict="Multiple claims reviewed",
+            # Retained for older API consumers; this container has no article-wide score.
+            truth_score=50,
+            confidence_score=0,
+            concise_explanation=(
+                f"{completed_count} of {len(claim_reports)} independent claim reviews completed. "
+                "Read each claim's verdict, evidence, confidence, and limitations below. "
+                "No overall article truth score is calculated."
+            ),
+            gonka_trace=traces,
+            limitations=setup_limitations,
+        )
+
+    def _verify_claim(
+        self,
+        claim: str,
+        *,
+        setup_limitations: list[str],
+        source_article: ArticleContent | None,
+        traces: list[GonkaTraceRecord],
+    ) -> FactCheckReport:
         self._emit(
             "Search planning started",
             {
@@ -200,6 +308,12 @@ class TextFactCheckPipeline:
         if source_article is not None:
             source_evidence = article_to_evidence(source_article)
             evidence = relabel_evidence(remove_near_duplicates([source_evidence, *evidence]))
+        evidence = evidence[:getattr(self.evidence_processor, "max_evidence", 12)]
+        deep_review = None
+        if self.enable_deep_review:
+            evidence, deep_review, deep_traces = self._research_gaps(claim, evidence, queries.as_list())
+            traces.extend(deep_traces)
+            setup_limitations.extend(deep_review.limitations)
         if search_results and not evidence and source_article is None:
             setup_limitations.append(
                 "Search results were found, but no usable page content passed evidence validation."
@@ -437,7 +551,9 @@ class TextFactCheckPipeline:
 
         return FactCheckReport(
             extracted_claim=claim,
-            extracted_claims=extraction.claims,
+            deep_review=deep_review,
+            extracted_claims=[claim],
+            review_status="failed" if evidence and not verifier_outputs else "completed",
             final_verdict=consensus.final_verdict,
             truth_score=consensus.truth_score,
             confidence_score=consensus.confidence_score,
@@ -457,10 +573,67 @@ class TextFactCheckPipeline:
             ),
         )
 
+    def _research_gaps(
+        self, claim: str, evidence: list[EvidenceItem], initial_queries: list[str],
+    ) -> tuple[list[EvidenceItem], DeepReview, list[GonkaTraceRecord]]:
+        self._emit("Evidence gap review started", {"model": self.config.claim_model})
+        try:
+            plan, traces = self._call_json_validated(
+                step_name="evidence_gap_review", model_id=self.config.claim_model,
+                prompt_name="evidence_gap_review.txt",
+                payload={"claim": claim, "evidence": [item.model_dump() for item in evidence],
+                         "initial_queries": initial_queries},
+                validator=validate_english_evidence_gap_plan,
+            )
+        except PipelineStepFailed as exc:
+            note = "Professional evidence-gap analysis failed; the initial evidence was still reviewed."
+            self._emit("Evidence gap review failed", {"reason": note})
+            return evidence, DeepReview(status="failed", initial_source_count=len(evidence), limitations=[note]), exc.traces
+
+        seen = {" ".join(query.split()).casefold() for query in initial_queries}
+        follow_up = []
+        for query in plan.follow_up_queries:
+            query = " ".join(query.split())[:250]
+            if query and query.casefold() not in seen:
+                seen.add(query.casefold())
+                follow_up.append(query)
+        result = DeepReview(status="completed", summary=plan.summary, gaps=plan.gaps,
+                            follow_up_queries=follow_up, initial_source_count=len(evidence))
+        self._emit("Evidence gap review completed", {"summary": plan.summary, "gaps": plan.gaps, "queries": follow_up})
+        if not follow_up:
+            if plan.gaps:
+                result.status = "partial"
+                result.limitations.append("Evidence gaps were identified, but no new targeted queries were produced.")
+            return evidence, result, traces
+
+        self._emit("Follow-up research started", {"queries": follow_up, "query_count": len(follow_up)})
+        try:
+            self._preview_browser_searches(follow_up)
+            results = self.search_provider.search_many(follow_up, max_results_per_query=self.max_results_per_query)
+            errors = list(getattr(self.search_provider, "last_errors", []))
+            fresh = self.evidence_processor.build_evidence(results)
+            existing_urls = {item.url for item in evidence}
+            fresh = [item for item in fresh if item.url not in existing_urls]
+            # Reserve space for targeted findings before both verifiers read the final ledger.
+            limit = getattr(self.evidence_processor, "max_evidence", 12)
+            combined = remove_near_duplicates([*fresh[:min(4, limit)], *evidence])
+            evidence = relabel_evidence(combined[:limit])
+            result.additional_source_count = sum(item.url not in existing_urls for item in evidence)
+            if errors or not result.additional_source_count:
+                result.status = "partial"
+                result.limitations.append("Follow-up research returned no additional usable sources." if not result.additional_source_count
+                                          else "Some follow-up searches failed; available sources were retained.")
+        except Exception:
+            result.status = "partial"
+            result.limitations.append("Follow-up research was unavailable; the initial evidence was still reviewed.")
+        self._emit("Follow-up research completed", {"status": result.status, "additional_source_count": result.additional_source_count,
+                                                   "evidence_count": len(evidence), "limitations": result.limitations})
+        return evidence, result, traces
+
     def _emit(self, stage: str, details: dict[str, Any] | None = None) -> None:
         if self.progress_callback is None:
             return
-        self.progress_callback(stage, details or {})
+        self.progress_callback(stage, {**self._claim_context, **(details or {})})
 
     def _preview_browser_searches(self, queries: list[str]) -> None:
         if self.browser_demo is None:
@@ -523,7 +696,13 @@ class TextFactCheckPipeline:
                 limitations.append(f"Article extraction failed: {exc}")
         if not parts:
             raise PipelineConfigError("Enter a text claim, an article URL, or both.")
-        return "\n\n".join(parts)[:12000], limitations, source_article
+        source_text = "\n\n".join(parts)
+        if len(source_text) > 12000:
+            limitations.append(
+                "Claim extraction was limited to the first 12,000 characters; "
+                "claims beyond that input window were not reviewed."
+            )
+        return source_text[:12000], limitations, source_article
 
     def _extract_claims(
         self,
@@ -538,7 +717,7 @@ class TextFactCheckPipeline:
                 model_id=self.config.claim_model,
                 prompt_name="claim_extractor.txt",
                 payload=payload,
-                validator=ClaimExtraction.model_validate,
+                validator=validate_english_claim_extraction,
             )
             return output, traces, []
         except PipelineStepFailed as exc:
@@ -550,7 +729,10 @@ class TextFactCheckPipeline:
                 for trace in exc.traces
             )
             reason = "Claim extraction timed out" if is_timeout else "Claim extraction failed"
-            limitation = f"{reason}; the submitted text or article title was used as a fallback claim."
+            limitation = (
+                f"{reason}; the submitted text or article title was used as a fallback claim. "
+                "Additional claims could not be separated and were not independently reviewed."
+            )
             self._emit(
                 "Claim extraction fallback used",
                 {"reason": reason, "fallback_claim": candidate},
@@ -668,7 +850,8 @@ class TextFactCheckPipeline:
                     prompt=prompt,
                     user_payload=current_payload,
                 )
-                traces.append(result.trace)
+                trace = self._capture_trace(result.trace)
+                traces.append(trace)
                 self._emit(
                     "Gonka call completed",
                     {
@@ -684,7 +867,7 @@ class TextFactCheckPipeline:
                 parsed = parse_json_object(result.text)
                 return validator(parsed), traces
             except GonkaCallFailed as exc:
-                traces.append(exc.trace)
+                traces.append(self._capture_trace(exc.trace))
                 last_error = exc
                 self._emit(
                     "Gonka call failed",
@@ -716,6 +899,26 @@ class TextFactCheckPipeline:
             }
         raise PipelineStepFailed(f"{step_name} failed: {last_error}", traces)
 
+    def _capture_trace(self, trace: GonkaTraceRecord) -> GonkaTraceRecord:
+        trace = trace.model_copy(
+            update={key: value for key, value in self._claim_context.items() if key in {"claim_index", "claim"}}
+        )
+        if self._current_claim_traces is not None:
+            self._current_claim_traces.append(trace)
+        return trace
+
+
+def unique_extracted_claims(claims: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for claim in claims:
+        normalized = " ".join(claim.split())
+        key = normalized.casefold().rstrip(".!?。！？")
+        if key and key not in seen:
+            seen.add(key)
+            result.append(normalized)
+    return result
+
 
 def deterministic_claim_fallback(fallback_claim: str, source_text: str) -> str:
     candidate = " ".join(fallback_claim.split()).strip()
@@ -731,6 +934,10 @@ def deterministic_claim_fallback(fallback_claim: str, source_text: str) -> str:
 
 def validate_verifier_output(data: dict[str, Any], allowed_evidence_ids: set[str]) -> VerifierOutput:
     output = VerifierOutput.model_validate(data)
+    require_english_generated_text(
+        [output.reasoning_summary, *output.missing_information],
+        "verifier explanation",
+    )
     invalid_ids = output.referenced_evidence_ids() - allowed_evidence_ids
     if invalid_ids:
         raise ValueError(f"Model cited unknown Evidence IDs: {', '.join(sorted(invalid_ids))}")
@@ -757,6 +964,29 @@ def validate_verifier_output(data: dict[str, Any], allowed_evidence_ids: set[str
                 f"{output.verdict!r}; expected {minimum}-{maximum}."
             )
     return output
+
+
+def validate_english_claim_extraction(data: dict[str, Any]) -> ClaimExtraction:
+    output = ClaimExtraction.model_validate(data)
+    require_english_generated_text(
+        [*output.claims, output.not_verifiable_reason],
+        "claim extraction",
+    )
+    return output
+
+
+def validate_english_evidence_gap_plan(data: dict[str, Any]) -> EvidenceGapPlan:
+    output = EvidenceGapPlan.model_validate(data)
+    require_english_generated_text(
+        [output.summary, *output.gaps, *output.follow_up_queries],
+        "professional research explanation",
+    )
+    return output
+
+
+def require_english_generated_text(values: list[str], field_name: str) -> None:
+    if any(NON_ENGLISH_SCRIPT_PATTERN.search(value or "") for value in values):
+        raise ValueError(f"{field_name} must be written in English; translate all non-English text")
 
 
 def collect_evidence_ids(

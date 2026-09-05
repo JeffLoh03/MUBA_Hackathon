@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
@@ -9,6 +12,7 @@ import pytesseract
 
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SUPPORTED_IMAGE_TYPES = {
     "image/jpeg",
     "image/jpg",
@@ -61,10 +65,35 @@ def process_image(image_bytes: bytes, mime_type: str) -> ProcessedImage:
 
 
 def extract_ocr_text(image: Image.Image) -> tuple[str, str]:
+    executable = find_tesseract()
+    if executable:
+        pytesseract.pytesseract.tesseract_cmd = executable
     try:
         return " ".join(pytesseract.image_to_string(image).split()), ""
     except Exception as exc:
         return "", f"OCR unavailable: {exc}"
+
+
+def find_tesseract() -> str | None:
+    """Locate OCR without requiring a restarted Windows terminal or global PATH edits."""
+    configured = os.getenv("TESSERACT_CMD", "").strip()
+    if configured:
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        return str(candidate)
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    if os.name == "nt":
+        candidates = [
+            Path(os.getenv("ProgramFiles", "C:/Program Files")) / "Tesseract-OCR/tesseract.exe",
+            Path(os.getenv("LOCALAPPDATA", "")) / "Programs/Tesseract-OCR/tesseract.exe",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    return None
 
 
 def extract_exif_summary(image: Image.Image) -> dict[str, str]:

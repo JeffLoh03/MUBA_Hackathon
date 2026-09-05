@@ -6,8 +6,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from config import AppConfig
-from schemas.models import SearchQueries, SearchResult
+from backend.config import AppConfig
+from backend.schemas.models import SearchQueries, SearchResult
 
 
 class SearchProviderError(Exception):
@@ -85,7 +85,9 @@ class SearchProvider:
         return results
 
     def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
-        if self.config.search_provider == "tavily" and self.config.tavily_api_key:
+        if self.config.search_provider == "tavily":
+            if not self.config.tavily_api_key:
+                raise SearchProviderError("TAVILY_API_KEY is required when SEARCH_PROVIDER=tavily.")
             return tavily_search(query, self.config.tavily_api_key, max_results, self.timeout)
         return duckduckgo_search(query, max_results, self.timeout)
 

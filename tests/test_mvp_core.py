@@ -8,14 +8,19 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from config import AppConfig
-from pipeline.consensus import build_consensus, needs_judge
-from pipeline.image_pipeline import ImageFactCheckPipeline
-from pipeline.text_pipeline import TextFactCheckPipeline, validate_verifier_output
-from schemas.models import ArticleContent, EvidenceItem, FactCheckReport, GonkaTraceRecord, SearchResult, VerifierOutput
-from services.article_extractor import URLSafetyError, validate_public_url
-from services.evidence_processor import EvidenceProcessor, dedupe_search_results, remove_near_duplicates
-from services.gonka_client import (
+from backend.config import AppConfig
+from backend.pipeline.consensus import build_consensus, needs_judge
+from backend.pipeline.image_pipeline import ImageFactCheckPipeline
+from backend.pipeline.text_pipeline import TextFactCheckPipeline, validate_verifier_output
+from backend.schemas.models import ArticleContent, EvidenceItem, FactCheckReport, GonkaTraceRecord, SearchResult, VerifierOutput
+from backend.services.article_extractor import (
+    URLSafetyError,
+    extract_published_date,
+    fetch_page,
+    validate_public_url,
+)
+from backend.services.evidence_processor import EvidenceProcessor, dedupe_search_results, remove_near_duplicates
+from backend.services.gonka_client import (
     GonkaCallFailed,
     GonkaClient,
     GonkaClientError,
@@ -24,15 +29,15 @@ from services.gonka_client import (
     redact_secrets,
     strip_private_reasoning,
 )
-from services.image_processor import process_image
-from services.search_provider import (
+from backend.services.image_processor import process_image
+from backend.services.search_provider import (
     SearchProvider,
     SearchProviderError,
     deterministic_search_queries,
     duckduckgo_search,
 )
-from services.source_credibility import assess_source_credibility
-from services.source_ranker import classify_source, publisher_from_url, root_domain
+from backend.services.source_credibility import assess_source_credibility
+from backend.services.source_ranker import classify_source, publisher_from_url, root_domain
 
 
 def make_config() -> AppConfig:
@@ -485,7 +490,7 @@ def test_duckduckgo_search_follows_redirects_and_parses_nasa_result(monkeypatch)
         assert kwargs["follow_redirects"] is True
         return FakeResponse()
 
-    monkeypatch.setattr("services.search_provider.httpx.get", fake_get)
+    monkeypatch.setattr("backend.services.search_provider.httpx.get", fake_get)
 
     results = duckduckgo_search("NASA confirms DART", max_results=3, timeout=12)
 
@@ -504,11 +509,19 @@ def test_search_many_records_provider_failures(monkeypatch):
     assert len(provider.last_errors) == 2
 
 
+def test_tavily_configuration_requires_api_key():
+    config = replace(make_config(), search_provider="tavily", tavily_api_key="")
+
+    assert "TAVILY_API_KEY" in config.missing_required_values()
+    with pytest.raises(SearchProviderError, match="TAVILY_API_KEY"):
+        SearchProvider(config).search("test claim")
+
+
 def test_evidence_uses_search_snippet_when_article_dns_resolution_fails(monkeypatch):
     def fail_extract(url):
         raise URLSafetyError("Could not resolve hostname 'www.nasa.gov'.")
 
-    monkeypatch.setattr("services.evidence_processor.extract_article", fail_extract)
+    monkeypatch.setattr("backend.services.evidence_processor.extract_article", fail_extract)
 
     evidence = EvidenceProcessor(max_evidence=3).build_evidence(
         [
@@ -712,7 +725,7 @@ def test_news_url_extraction(monkeypatch):
     def fake_extract_article(url: str) -> ArticleContent:
         return ArticleContent(url=url, title="News title", text="The mayor signed the bill in 2026.")
 
-    monkeypatch.setattr("pipeline.text_pipeline.extract_article", fake_extract_article)
+    monkeypatch.setattr("backend.pipeline.text_pipeline.extract_article", fake_extract_article)
     config = make_config()
     gonka = FakeGonkaClient(
         {
@@ -737,7 +750,7 @@ def test_news_url_extraction(monkeypatch):
 
 
 def test_screenshot_ocr(monkeypatch):
-    monkeypatch.setattr("services.image_processor.pytesseract.image_to_string", lambda image: "Visible claim text")
+    monkeypatch.setattr("backend.services.image_processor.pytesseract.image_to_string", lambda image: "Visible claim text")
 
     processed = process_image(make_png_bytes(), "image/png")
 
@@ -745,7 +758,7 @@ def test_screenshot_ocr(monkeypatch):
 
 
 def test_image_without_caption_or_text(monkeypatch):
-    monkeypatch.setattr("services.image_processor.pytesseract.image_to_string", lambda image: "")
+    monkeypatch.setattr("backend.services.image_processor.pytesseract.image_to_string", lambda image: "")
     pipeline = ImageFactCheckPipeline(FakeTextPipeline(), FakeGonkaClient(), vision_model_id="")
 
     report = pipeline.verify(image_bytes=make_png_bytes(), mime_type="image/png", caption_or_claim="")
@@ -755,7 +768,7 @@ def test_image_without_caption_or_text(monkeypatch):
 
 
 def test_missing_exif_is_neutral(monkeypatch):
-    monkeypatch.setattr("services.image_processor.pytesseract.image_to_string", lambda image: "")
+    monkeypatch.setattr("backend.services.image_processor.pytesseract.image_to_string", lambda image: "")
 
     processed = process_image(make_png_bytes(), "image/png")
 
@@ -1108,7 +1121,7 @@ def test_insufficient_evidence_produces_unverified():
 
 
 def test_vision_model_unavailable_fallback(monkeypatch):
-    monkeypatch.setattr("services.image_processor.pytesseract.image_to_string", lambda image: "Claim text")
+    monkeypatch.setattr("backend.services.image_processor.pytesseract.image_to_string", lambda image: "Claim text")
     pipeline = ImageFactCheckPipeline(FakeTextPipeline(), FailingVisionGonkaClient(), vision_model_id="model-vision")
 
     report = pipeline.verify(
@@ -1150,6 +1163,39 @@ def test_private_reasoning_is_stripped_before_display_or_json_parsing():
 def test_private_network_url_blocking():
     with pytest.raises(URLSafetyError):
         validate_public_url("http://127.0.0.1:8501/private")
+
+
+def test_private_network_redirect_is_blocked(monkeypatch):
+    import httpx
+
+    real_client = httpx.Client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "http://127.0.0.1/private"}, request=request)
+
+    monkeypatch.setattr(
+        "backend.services.article_extractor.resolve_hostname",
+        lambda hostname: ["93.184.216.34"] if hostname == "example.com" else [hostname],
+    )
+    monkeypatch.setattr(
+        "backend.services.article_extractor.httpx.Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+
+    with pytest.raises(URLSafetyError):
+        fetch_page("https://example.com/start")
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ('<meta property="article:published_time" content="2026-08-29T10:00:00Z">', "2026-08-29T10:00:00Z"),
+        ('<time datetime="2026-08-30">August 30</time>', "2026-08-30"),
+        ('<script type="application/ld+json">{"datePublished":"2026-08-31"}</script>', "2026-08-31"),
+    ],
+)
+def test_extract_published_date(html, expected):
+    assert extract_published_date(html) == expected
 
 
 def test_single_low_credibility_website_is_high_risk():

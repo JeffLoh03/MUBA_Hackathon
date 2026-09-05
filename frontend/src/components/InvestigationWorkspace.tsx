@@ -8,7 +8,7 @@ export function InvestigationWorkspace() {
   const verification = useVerification();
 
   if (verification.status === "complete" && verification.report) {
-    return <><AppHeader /><ReportView report={verification.report} completedAt={verification.completedAt} mode={verification.mode} input={verification.input} imageName={verification.image?.name ?? ""} onReset={verification.reset} /></>;
+    return <><AppHeader /><ReportView report={verification.report} runId={verification.runId} completedAt={verification.completedAt} mode={verification.mode} input={verification.input} imageName={verification.image?.name ?? ""} onReset={verification.reset} /></>;
   }
 
   return (

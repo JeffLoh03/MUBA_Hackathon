@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 import time
@@ -64,6 +65,7 @@ CASES = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run real end-to-end fact-check evaluations.")
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
+    parser.add_argument("--email", required=True, help="Existing desk account email; password is prompted securely.")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument(
         "--case",
@@ -204,6 +206,8 @@ def main() -> int:
     try:
         with httpx.Client(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
             check_health(client, args.api_url)
+            response = client.post(f"{args.api_url.rstrip('/')}/api/auth/login", json={"email": args.email, "password": getpass.getpass("Desk password: ")})
+            response.raise_for_status()
             for repetition in range(1, args.repeat + 1):
                 for case in selected_cases:
                     results.append(run_case(client, args.api_url, case, repetition))

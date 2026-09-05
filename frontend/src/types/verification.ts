@@ -51,6 +51,8 @@ export interface VerifierOutput {
 }
 
 export interface GonkaTraceRecord {
+  claim_index?: number | null;
+  claim?: string | null;
   step_name: string;
   requested_model_id: string;
   returned_model_id: string | null;
@@ -66,6 +68,18 @@ export interface GonkaTraceRecord {
 }
 
 export interface FactCheckReport {
+  deep_review?: {
+    status: "completed" | "partial" | "failed";
+    summary: string;
+    gaps: string[];
+    follow_up_queries: string[];
+    initial_source_count: number;
+    additional_source_count: number;
+    limitations: string[];
+  } | null;
+  claim_reports?: FactCheckReport[];
+  unreviewed_claims?: string[];
+  review_status?: "completed" | "partial" | "failed";
   extracted_claim: string;
   extracted_claims: string[];
   final_verdict: string;
@@ -84,7 +98,7 @@ export interface FactCheckReport {
 }
 
 export interface ImageContextAssessment {
-  verdict: "Context Supported" | "Possible Context Mismatch" | "Misleading Caption" | "Insufficient Evidence";
+  verdict: "Context Supported" | "Possible Context Mismatch" | "Misleading Caption" | "Insufficient Evidence" | "Multiple claims reviewed";
   ocr_text: string;
   caption_or_claim: string;
   exif_summary: Record<string, string>;
@@ -97,4 +111,32 @@ export interface ProgressEvent {
   stage: string;
   details: Record<string, unknown>;
   timestamp_utc: string;
+}
+
+export interface AuditRunSummary {
+  id: string;
+  input_type: "text" | "url" | "image";
+  input_text: string;
+  article_url: string;
+  image_name: string;
+  mode: VerificationMode;
+  status: "running" | "completed" | "failed";
+  created_at_utc: string;
+  completed_at_utc: string | null;
+  extracted_claim: string;
+  final_verdict: string | null;
+  truth_score: number | null;
+  confidence_score: number | null;
+  error_message: string | null;
+  gonka_call_count: number;
+}
+
+export interface StoredGonkaCall extends GonkaTraceRecord {
+  sequence_number: number;
+}
+
+export interface AuditRunDetail extends Omit<AuditRunSummary, "gonka_call_count"> {
+  report: FactCheckReport | null;
+  events: Array<ProgressEvent & { sequence_number: number }>;
+  gonka_calls: StoredGonkaCall[];
 }

@@ -28,5 +28,5 @@ Rules:
 - If evidence is not strong enough, return verdict "unverified".
 - For an unverified verdict, use a neutral support_score from 45 to 55.
 - Keep reasoning_summary concise and auditable.
-- Write reasoning_summary in the same language as the claim.
+- Write reasoning_summary and every missing_information item in clear English, even when the claim or evidence uses another language.
 - Do not output private chain-of-thought.

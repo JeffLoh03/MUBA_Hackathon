@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config import ConfigError, load_config
-from services.gonka_client import GonkaCallFailed, GonkaClient, GonkaClientError, redact_secrets
+from backend.config import ConfigError, load_config
+from backend.services.gonka_client import GonkaCallFailed, GonkaClient, GonkaClientError, redact_secrets
 
 
 TEST_PROMPT = "Reply with exactly: GONKA_TEST_OK"
@@ -30,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument("--model", help="Test one exact model ID.")
     actions.add_argument("--test-first", type=int, metavar="N", help="Test the first N listed models.")
     actions.add_argument("--all", action="store_true", help="Test all listed models.")
+    actions.add_argument("--configured", action="store_true", help="Test the distinct models selected in .env.")
+    parser.add_argument("--output", type=Path, default=RESULTS_PATH, help="Path for the redacted JSON results.")
     return parser
 
 
@@ -52,7 +54,14 @@ def main(argv: list[str] | None = None) -> int:
         return list_models(client, secrets)
 
     try:
-        selected, mode = select_models(client, args)
+        if args.configured:
+            selected = list(dict.fromkeys(model for model in (
+                config.claim_model, config.gonka_verify_model_1, config.gonka_verify_model_2,
+                config.judge_model, config.gonka_fallback_model,
+            ) if model))
+            mode = "configured"
+        else:
+            selected, mode = select_models(client, args)
     except Exception as exc:
         print(f"Could not select models: {redact_secrets(str(exc), secrets)}", file=sys.stderr)
         return 1
@@ -65,8 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Testing {model_id} ...", flush=True)
         results.append(run_smoke_check(client, model_id, secrets))
     print_results_table(results)
-    save_results(config.gonka_base_url, mode, results, secrets)
-    print(f"\nSaved safe report to {RESULTS_PATH}")
+    save_results(config.gonka_base_url, mode, results, secrets, path=args.output)
+    print(f"\nSaved safe report to {args.output}")
     return 0 if all(item["success"] for item in results) else 1
 
 
@@ -183,7 +192,7 @@ def print_results_table(results: list[dict[str, Any]]) -> None:
         print(format_row(row, widths))
 
 
-def save_results(base_url: str, mode: str, results: list[dict[str, Any]], secrets: list[str]) -> None:
+def save_results(base_url: str, mode: str, results: list[dict[str, Any]], secrets: list[str], *, path: Path = RESULTS_PATH) -> None:
     payload = {
         "generated_at_utc": utc_now_iso(),
         "base_url": base_url,
@@ -192,7 +201,8 @@ def save_results(base_url: str, mode: str, results: list[dict[str, Any]], secret
         "results": results,
     }
     text = redact_secrets(json.dumps(payload, indent=2, ensure_ascii=True), secrets)
-    RESULTS_PATH.write_text(text, encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def format_row(values: list[str], widths: list[int]) -> str:

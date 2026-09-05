@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Verdict = Literal["true", "mostly_true", "misleading", "mostly_false", "false", "unverified"]
 ImageVerdict = Literal[
+    "Multiple claims reviewed",
     "Context Supported",
     "Possible Context Mismatch",
     "Misleading Caption",
@@ -95,6 +96,8 @@ class VerifierOutput(BaseModel):
 
 class GonkaTraceRecord(BaseModel):
     step_name: str
+    claim_index: int | None = Field(default=None, ge=1)
+    claim: str | None = None
     requested_model_id: str
     returned_model_id: str | None = None
     response_body_id: str | None = None
@@ -121,9 +124,30 @@ class ImageContextAssessment(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class EvidenceGapPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    summary: str = Field(max_length=2000)
+    gaps: list[str] = Field(default_factory=list, max_length=8)
+    follow_up_queries: list[str] = Field(default_factory=list, max_length=3)
+
+
+class DeepReview(BaseModel):
+    status: Literal["completed", "partial", "failed"]
+    summary: str = ""
+    gaps: list[str] = Field(default_factory=list)
+    follow_up_queries: list[str] = Field(default_factory=list)
+    initial_source_count: int = 0
+    additional_source_count: int = 0
+    limitations: list[str] = Field(default_factory=list)
+
+
 class FactCheckReport(BaseModel):
+    deep_review: DeepReview | None = None
     extracted_claim: str
     extracted_claims: list[str] = Field(default_factory=list)
+    claim_reports: list[FactCheckReport] = Field(default_factory=list)
+    unreviewed_claims: list[str] = Field(default_factory=list)
+    review_status: Literal["completed", "failed", "partial"] = "completed"
     final_verdict: str
     truth_score: int = Field(ge=0, le=100)
     confidence_score: int = Field(ge=0, le=100)

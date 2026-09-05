@@ -47,6 +47,8 @@ class AppConfig:
             missing.append("GONKA_VERIFY_MODEL_1")
         if not self.gonka_verify_model_2:
             missing.append("GONKA_VERIFY_MODEL_2")
+        if self.search_provider == "tavily" and not self.tavily_api_key:
+            missing.append("TAVILY_API_KEY")
         return missing
 
     def multi_model_issue(self) -> str | None:

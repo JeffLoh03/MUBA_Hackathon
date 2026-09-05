@@ -1,11 +1,13 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { analysisStages } from "../data/verificationStages";
 import type { FactCheckReport, ProgressEvent, StageStatus, VerificationMode, VerificationStatus } from "../types/verification";
+import { useAuth } from "./useAuth";
+import { consumeVerificationStream, overallClaimProgress } from "./verificationStream";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
-const progressByStage: Record<string, number> = {
+export const progressByStage: Record<string, number> = {
   "Image validation started": 2,
   "OCR and EXIF completed": 6,
   "Vision context analysis started": 8,
@@ -19,6 +21,10 @@ const progressByStage: Record<string, number> = {
   "Gonka call failed": 18,
   "Claim extraction fallback used": 22,
   "Claim extraction completed": 24,
+  "Claim review started": 24,
+  "Claim review completed": 99,
+  "Claim review failed": 99,
+  "All claims reviewed": 99,
   "Search planning started": 27,
   "Search planning completed": 32,
   "Visible browser starting": 34,
@@ -28,6 +34,11 @@ const progressByStage: Record<string, number> = {
   "Web search completed": 50,
   "Visible browser evidence opened": 54,
   "Evidence processing started": 58,
+  "Evidence gap review started": 59,
+  "Evidence gap review completed": 60,
+  "Evidence gap review failed": 60,
+  "Follow-up research started": 61,
+  "Follow-up research completed": 64,
   "Evidence processing completed": 65,
   "Source credibility scored": 70,
   "Verifier 1 started": 74,
@@ -56,6 +67,7 @@ function isArticleUrl(value: string): boolean {
 }
 
 export function useVerification() {
+  const { request } = useAuth();
   const [status, setStatus] = useState<VerificationStatus>("idle");
   const [progress, setProgress] = useState(0);
   const [input, setInput] = useState("");
@@ -66,7 +78,11 @@ export function useVerification() {
   const [events, setEvents] = useState<ProgressEvent[]>([]);
   const [report, setReport] = useState<FactCheckReport | null>(null);
   const [completedAt, setCompletedAt] = useState("");
+  const [runId, setRunId] = useState("");
   const abortController = useRef<AbortController | null>(null);
+  const requestActive = useRef(false);
+
+  useEffect(() => () => { abortController.current?.abort(); }, []);
 
   const stages = useMemo(() => analysisStages.map((stage) => {
     let stageStatus: StageStatus = "waiting";
@@ -90,6 +106,7 @@ export function useVerification() {
   }
 
   async function startVerification() {
+    if (requestActive.current) return;
     const submittedInput = input.trim();
     if (!submittedInput && !image) {
       setError("Paste a claim or article URL, or attach an image.");
@@ -98,11 +115,13 @@ export function useVerification() {
 
     abortController.current?.abort();
     abortController.current = new AbortController();
+    requestActive.current = true;
     setError("");
     setProgress(1);
     setEvents([]);
     setReport(null);
     setCompletedAt("");
+    setRunId("");
     setStatus("processing");
 
     try {
@@ -113,13 +132,13 @@ export function useVerification() {
         formData.append("caption", submittedInput);
         formData.append("mode", mode);
         formData.append("show_browser", String(showBrowser));
-        response = await fetch("/api/verify/image/stream", {
+        response = await request("/api/verify/image/stream", {
           method: "POST",
           body: formData,
           signal: abortController.current.signal,
         });
       } else {
-        response = await fetch("/api/verify/stream", {
+        response = await request("/api/verify/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -148,41 +167,29 @@ export function useVerification() {
       if (requestError instanceof DOMException && requestError.name === "AbortError") return;
       setError(requestError instanceof Error ? requestError.message : "Verification failed.");
       setStatus("idle");
+    } finally {
+      requestActive.current = false;
     }
   }
 
   async function readVerificationStream(response: Response) {
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const message = JSON.parse(line) as {
-          type: "progress" | "report" | "error";
-          data: ProgressEvent | { report: FactCheckReport; completed_at_utc: string } | { message: string };
-        };
-        if (message.type === "progress") {
-          const event = message.data as ProgressEvent;
+    await consumeVerificationStream(response, (message) => {
+        if (message.type === "run") {
+          setRunId(message.data.run_id);
+        } else if (message.type === "progress") {
+          const event = message.data;
           setEvents((current) => [...current, event]);
           const next = progressByStage[event.stage];
-          if (next !== undefined) setProgress((current) => Math.max(current, next));
+          if (next !== undefined) setProgress((current) => Math.max(current, overallClaimProgress(next, event.details)));
         } else if (message.type === "report") {
-          const result = message.data as { report: FactCheckReport; completed_at_utc: string };
+          const result = message.data;
+          setRunId(result.run_id);
           setReport(result.report);
           setCompletedAt(result.completed_at_utc);
           setProgress(100);
           setStatus("complete");
-        } else {
-          throw new Error((message.data as { message: string }).message);
         }
-      }
-      if (done) break;
-    }
+    });
   }
 
   function reset() {
@@ -195,6 +202,7 @@ export function useVerification() {
     setEvents([]);
     setReport(null);
     setCompletedAt("");
+    setRunId("");
   }
 
   const sourceCount = useMemo(() => {
@@ -206,6 +214,6 @@ export function useVerification() {
   return {
     status, progress, input, setInput, image, selectImage, removeImage: () => setImage(null),
     mode, setMode, error, stages, startVerification, reset, showBrowser, setShowBrowser,
-    events, sourceCount, report, completedAt,
+    events, sourceCount, report, completedAt, runId,
   };
 }
