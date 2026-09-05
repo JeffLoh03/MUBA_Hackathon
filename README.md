@@ -17,6 +17,32 @@ Generated report content is always requested in English. Non-English model expla
 
 During a review, the React page receives real progress events from Python. It shows search activity, evidence counts, source scoring and model stages without exposing private chain-of-thought. The final audit trail keeps Gonka response IDs separate from request and trace headers.
 
+## Current Features
+
+- Text, article URL, and image-caption investigations.
+- Quick and Professional review modes with clearly different research depth.
+- Up to three claims extracted and verified independently from one submission.
+- Side-by-side claim comparison with separate verdicts, truth scores, confidence, evidence, and model agreement.
+- Expandable evidence quotations and links to every retained source.
+- A Gonka compliance summary showing the verifier models, agreement, successful and failed calls, and identifier coverage.
+- SQLite transparency history with readable investigation titles, live progress recovery, complete reports, events, and Gonka request IDs.
+- First-owner account setup, password login, private account-scoped history, session expiry, and rate limits.
+- English generated reports. Original input, OCR text, URLs, and source quotations remain unchanged for audit accuracy.
+- Tesseract OCR, image metadata inspection, and caption-based evidence research.
+
+## Hackathon Requirement Coverage
+
+| Requirement | Implementation |
+| --- | --- |
+| Gonka Router integration | Claim extraction, Professional search planning, evidence-gap review, two independent verifiers, and disagreement judging run through the configured Gonka gateway. |
+| Multi-model consensus | Two distinct verifier models review the same evidence independently. A firm verdict requires at least two decisive outputs. |
+| Claim or article input | The React interface accepts direct text, article URLs, and captioned images. |
+| Decentralized verification | Open-web evidence is retrieved and supplied to Gonka-hosted models; failures stay visible and are excluded from consensus. |
+| Truth score and reasoning | Every verified claim has its own verdict, truth score, confidence, and concise public reasoning. `Unverified` claims show an undetermined truth score. |
+| Transparency UI | SQLite stores the report, public progress events, model IDs, latency, token usage, response IDs, request IDs, and trace IDs. |
+
+`Unverified` means the available evidence or successful model responses were insufficient for a firm conclusion. It does not mean the claim is false.
+
 ## Requirements
 
 - Python 3.11+
@@ -115,8 +141,15 @@ Press Enter to verify or Shift+Enter for a new line. Uploaded images are process
 
 Review modes:
 
-- `Quick review` accepts a short direct-text claim without an extra extraction call, uses compact deterministic search queries with common organization aliases, and retains up to 5 evidence sources.
-- `Professional review` extracts claims and plans research through Gonka, then runs an additional evidence-gap assessment for each claim. It checks for missing primary sources, dates, independent corroboration and counter-evidence, and can execute up to three new targeted searches. Both verifiers receive the expanded, deduplicated evidence (up to 12 sources per claim). The report saves the research summary, identified gaps, queries, additional source count, and failures. When the evidence is sufficient, the assessment can skip further searches. This mode takes longer and uses additional model calls.
+| Capability | Quick review | Professional review |
+| --- | --- | --- |
+| Intended use | Fast check of a focused claim | Articles, multiple claims, statistics, or disputed context |
+| Claim extraction | Direct handling for a short single claim; AI extraction when needed | AI claim extraction on every submission |
+| Search planning | Deterministic query plan | Gonka-generated research plan |
+| Research passes | One | Initial research plus evidence-gap analysis and up to three targeted follow-up searches |
+| Evidence retained | Up to 5 sources per claim | Up to 12 sources per claim |
+| Independent verification | Two Gonka models | Two Gonka models using the expanded evidence |
+| Typical speed and usage | Faster and fewer model calls | Slower and more model calls |
 
 Both modes run the two distinct configured verifier models concurrently. A failed call is recorded and excluded from consensus. If fewer than two decisive outputs return, failed models receive one quorum-recovery attempt. A firm verdict requires at least two decisive outputs. An optional third model can be set with `GONKA_FALLBACK_MODEL`; with three valid outputs, consensus uses the median support score. During the local smoke test, Kimi was listed by the catalog but rejected by inference, so it is not selected by default.
 
@@ -143,6 +176,14 @@ Every verification is recorded in a local SQLite database at `data/verity_desk.d
 - each Gonka step's model ID, response ID, request ID, trace ID, latency, token usage, and safe failure state
 
 Open `http://127.0.0.1:8000/transparency` or select **Transparency** in the header to inspect the ledger. The JSON endpoints are `GET /api/audits` and `GET /api/audits/{run_id}`.
+
+Select an investigation card to reopen its live progress page or completed report. Use **View audit details** for the stored operational record. Multi-claim history cards use the submitted text or a readable article title instead of the generic `Multiple claims reviewed` label.
+
+The report UI separates three ideas:
+
+- `Truth score` measures how strongly the retained evidence supports the complete claim.
+- `Confidence` measures certainty in that assessment after evidence quality, model availability, and source risk are considered.
+- `Model agreement` reports whether the independent verifiers reached compatible conclusions. One successful model is insufficient for a firm verdict.
 
 Override the database location when needed:
 
