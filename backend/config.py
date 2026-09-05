@@ -30,6 +30,7 @@ class AppConfig:
     env_file_found: bool
     gonka_timeout_seconds: float = 60.0
     gonka_fallback_model: str = ""
+    gonka_decision_model: str = ""
 
     @property
     def claim_model(self) -> str:
@@ -38,6 +39,11 @@ class AppConfig:
     @property
     def judge_model(self) -> str:
         return self.gonka_judge_model or self.gonka_verify_model_1
+
+    @property
+    def decision_model(self) -> str:
+        """Return the dedicated final decision reviewer, when configured."""
+        return self.gonka_decision_model
 
     def missing_required_values(self) -> list[str]:
         missing: list[str] = []
@@ -90,6 +96,7 @@ def load_config(env_path: str | Path = ".env") -> AppConfig:
         env_file_found=env_file_found,
         gonka_timeout_seconds=read_timeout_seconds(),
         gonka_fallback_model=os.getenv("GONKA_FALLBACK_MODEL", "").strip(),
+        gonka_decision_model=os.getenv("GONKA_DECISION_MODEL", "").strip(),
     )
 
 

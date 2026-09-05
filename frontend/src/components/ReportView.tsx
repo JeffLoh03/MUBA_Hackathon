@@ -157,6 +157,11 @@ function SingleReportView({ report, runId, completedAt, mode, input, imageName, 
       ?? report.gonka_trace.find((item) => item.step_name.startsWith(stepName));
     return { ...finding, model: finding.model_id || trace?.requested_model_id || `Verifier ${index + 1}` };
   });
+  const decisionTrace = report.gonka_trace.find((item) => item.step_name === "decision_review" && item.success)
+    ?? report.gonka_trace.find((item) => item.step_name.startsWith("decision_review"));
+  const decisionFinding = report.judge_output
+    ? { ...report.judge_output, model: report.judge_output.model_id || decisionTrace?.requested_model_id || "Decision reviewer" }
+    : null;
 
   async function copyReport() {
     await navigator.clipboard.writeText([
@@ -225,9 +230,10 @@ function SingleReportView({ report, runId, completedAt, mode, input, imageName, 
       </section>
 
       <section className="report-section">
-        <div className="section-heading"><div><span>02</span><h2>Gonka model opinions</h2></div><p>Independent reviews are shown separately; model agreement never replaces evidence.</p></div>
+        <div className="section-heading"><div><span>02</span><h2>Gonka model opinions</h2></div><p>Independent reviews are shown first, followed by Kimi&apos;s final evidence-based decision audit.</p></div>
         <div className="model-grid">
           {modelFindings.map((finding, index) => <article className="model-finding" key={`${finding.model}-${index}`}><div><span className="model-initial">{shortModelName(finding.model).slice(0, 1)}</span><div><h3>{shortModelName(finding.model)}</h3><small>{finding.confidence}% confidence · {finding.support_score}/100 support</small></div></div><strong className={finding.support_score >= 60 ? "finding-verdict" : "finding-verdict warning-text"}><CheckCircle2 size={16} />{displayVerdict(finding.verdict)}</strong><p>{finding.reasoning_summary || "No public reasoning summary returned."}</p></article>)}
+          {decisionFinding && <article className="model-finding decision-finding"><div><span className="model-initial">{shortModelName(decisionFinding.model).slice(0, 1)}</span><div><h3>{shortModelName(decisionFinding.model)} · Final decision review</h3><small>{decisionFinding.confidence}% confidence · {decisionFinding.support_score}/100 support</small></div></div><strong className={decisionFinding.support_score >= 60 ? "finding-verdict" : "finding-verdict warning-text"}><CheckCircle2 size={16} />{displayVerdict(decisionFinding.verdict)}</strong><p>{decisionFinding.reasoning_summary || "No public decision summary returned."}</p></article>}
           {modelFindings.length === 0 && <p className="empty-report-row">No model opinion was produced for this input.</p>}
         </div>
       </section>

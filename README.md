@@ -11,6 +11,7 @@ The app does not ask one model to guess whether an article is true. It separates
 - Claim truth: extract a checkable claim and find supporting and contradicting evidence.
 - Source trust: score independence, quality, official-source coverage, missing dates and syndication risk.
 - Model review: DeepSeek and MiniMax independently assess the evidence through Gonka Router.
+- Final decision review: Kimi K2.6 audits the evidence, source-risk assessment, and both verifier outputs through Gonka before consensus rules are applied.
 - Deterministic consensus: fixed rules combine model output with source credibility and can force a weak case back to `Unverified`.
 
 Generated report content is always requested in English. Non-English model explanations, extracted claims, and Professional research summaries are rejected and retried before they can be saved. Original submitted text, OCR text, source quotations, names, and URLs remain in their original form so the audit record is faithful to the evidence.
@@ -112,6 +113,7 @@ GONKA_CLAIM_MODEL=MiniMaxAI/MiniMax-M2.7
 GONKA_VERIFY_MODEL_1=deepseek-ai/DeepSeek-V4-Flash-0731
 GONKA_VERIFY_MODEL_2=MiniMaxAI/MiniMax-M2.7
 GONKA_JUDGE_MODEL=MiniMaxAI/MiniMax-M2.7
+GONKA_DECISION_MODEL=moonshotai/Kimi-K2.6
 GONKA_FALLBACK_MODEL=
 GONKA_VISION_MODEL=
 
@@ -151,7 +153,7 @@ Review modes:
 | Independent verification | Two Gonka models | Two Gonka models using the expanded evidence |
 | Typical speed and usage | Faster and fewer model calls | Slower and more model calls |
 
-Both modes run the two distinct configured verifier models concurrently. A failed call is recorded and excluded from consensus. If fewer than two decisive outputs return, failed models receive one quorum-recovery attempt. A firm verdict requires at least two decisive outputs. An optional third model can be set with `GONKA_FALLBACK_MODEL`; with three valid outputs, consensus uses the median support score. During the local smoke test, Kimi was listed by the catalog but rejected by inference, so it is not selected by default.
+Both modes run the two distinct configured verifier models concurrently. A failed call is recorded and excluded from consensus. If fewer than two decisive outputs return, failed models receive one quorum-recovery attempt. A firm verdict requires at least two decisive outputs. An optional third model can be set with `GONKA_FALLBACK_MODEL`; with three valid outputs, consensus uses the median support score. When two verifier outputs are available, `moonshotai/Kimi-K2.6` performs a separate final decision review through Gonka. If that call fails, its failed request remains visible in the audit ledger and the deterministic verifier consensus is used safely instead.
 
 Both modes can independently verify up to three extracted claims. Select a claim in the final report to see its own evidence, verdict and scores. Extra extracted claims are listed as unreviewed. There is no aggregate article truth score. Quick review skips extraction for a short, single-statement input and performs one research pass. Professional always uses AI extraction and planning and adds the evidence-gap assessment. Older saved reports remain unchanged and show no additional research assessment.
 

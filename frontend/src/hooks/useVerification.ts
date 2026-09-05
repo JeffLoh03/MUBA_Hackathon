@@ -53,6 +53,9 @@ export const progressByStage: Record<string, number> = {
   "Disagreement detected": 91,
   "Judge completed": 94,
   "No judge needed": 94,
+  "Decision review started": 91,
+  "Decision review completed": 94,
+  "Decision review skipped": 94,
   "Consensus started": 96,
   "Consensus completed": 99,
 };

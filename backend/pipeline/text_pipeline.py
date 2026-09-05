@@ -475,7 +475,45 @@ class TextFactCheckPipeline:
                         f"{role.capitalize()} failed and was excluded from the consensus calculation."
                     )
 
-        if len(verifier_outputs) == 2 and needs_judge(*verifier_outputs):
+        if self.config.decision_model and len(verifier_outputs) >= 2:
+            self._emit(
+                "Decision review started",
+                {
+                    "model": self.config.decision_model,
+                    "verifier_count": len(verifier_outputs),
+                },
+            )
+            judge_output, judge_traces, judge_limitations = self._review_final_decision(
+                claim=claim,
+                evidence=evidence,
+                source_credibility=source_credibility,
+                verifier_outputs=verifier_outputs,
+            )
+            traces.extend(judge_traces)
+            self._emit(
+                "Decision review completed",
+                {
+                    "model": self.config.decision_model,
+                    "used_decision_review": judge_output is not None,
+                    "verdict": judge_output.verdict if judge_output else None,
+                    "support_score": judge_output.support_score if judge_output else None,
+                    "confidence": judge_output.confidence if judge_output else None,
+                    "limitations": judge_limitations,
+                },
+            )
+        elif self.config.decision_model:
+            judge_limitations.append(
+                "Kimi decision review was skipped because fewer than two verifier outputs were available."
+            )
+            self._emit(
+                "Decision review skipped",
+                {
+                    "model": self.config.decision_model,
+                    "verifier_count": len(verifier_outputs),
+                    "reason": "At least two verifier outputs are required.",
+                },
+            )
+        elif len(verifier_outputs) == 2 and needs_judge(*verifier_outputs):
             verifier_1, verifier_2 = verifier_outputs
             self._emit(
                 "Disagreement detected",
@@ -828,6 +866,37 @@ class TextFactCheckPipeline:
             return output, traces, limitations
         except PipelineStepFailed as exc:
             return None, exc.traces, [f"Judge step failed; deterministic consensus fallback was used: {exc}"]
+
+    def _review_final_decision(
+        self,
+        *,
+        claim: str,
+        evidence: list[EvidenceItem],
+        source_credibility: SourceCredibilityAssessment,
+        verifier_outputs: list[VerifierOutput],
+    ) -> tuple[VerifierOutput | None, list[Any], list[str]]:
+        """Ask a dedicated Gonka model to audit the evidence and reviewer outputs."""
+        allowed_ids = {item.evidence_id for item in evidence}
+        payload = {
+            "claim": claim,
+            "evidence": [item.model_dump() for item in evidence],
+            "source_credibility_assessment": source_credibility.model_dump(),
+            "verifier_outputs": [item.model_dump() for item in verifier_outputs],
+        }
+        try:
+            output, traces = self._call_json_validated(
+                step_name="decision_review",
+                model_id=self.config.decision_model,
+                prompt_name="decision_reviewer.txt",
+                payload=payload,
+                validator=lambda data: validate_verifier_output(data, allowed_ids),
+            )
+            return output.model_copy(update={"model_id": self.config.decision_model}), traces, []
+        except PipelineStepFailed as exc:
+            return None, exc.traces, [
+                "Kimi decision review failed; deterministic consensus from the independent "
+                f"verifiers was used instead: {exc}"
+            ]
 
     def _call_json_validated(
         self,

@@ -1106,6 +1106,47 @@ def test_two_disagreeing_models_trigger_judge():
     assert needs_judge(verifier(support_score=90), verifier(verdict="false", support_score=10))
 
 
+def test_kimi_reviews_every_eligible_final_decision():
+    kimi_model = "moonshotai/Kimi-K2.6"
+    config = replace(make_config(), gonka_decision_model=kimi_model)
+    gonka = FakeGonkaClient(
+        {
+            "claim_extraction": ['{"claims":["The city opened a new rail line in 2026"],"not_verifiable_reason":""}'],
+            "search_planning": [
+                '{"general_query":"rail line 2026","official_source_query":"rail line official","supporting_evidence_query":"rail line evidence","contradicting_evidence_query":"rail line false","date_context_query":"rail line date","old_news_or_misinformation_query":"rail line old"}'
+            ],
+            "verifier_1": [
+                '{"verdict":"true","support_score":90,"confidence":80,"supporting_evidence":["E1"],"contradicting_evidence":[],"context_mismatch":false,"reasoning_summary":"The evidence supports the claim.","missing_information":[]}'
+            ],
+            "verifier_2": [
+                '{"verdict":"true","support_score":88,"confidence":78,"supporting_evidence":["E1"],"contradicting_evidence":[],"context_mismatch":false,"reasoning_summary":"The independent review supports the claim.","missing_information":[]}'
+            ],
+            "decision_review": [
+                '{"verdict":"true","support_score":89,"confidence":82,"supporting_evidence":["E1"],"contradicting_evidence":[],"context_mismatch":false,"reasoning_summary":"The retained evidence supports the complete claim.","missing_information":[]}'
+            ],
+        }
+    )
+    pipeline = TextFactCheckPipeline(
+        config,
+        gonka,
+        FakeSearchProvider(),
+        FakeEvidenceProcessor([evidence_item()]),
+    )
+
+    report = pipeline.verify(text="The city opened a new rail line in 2026.")
+
+    assert ("decision_review", kimi_model) in gonka.calls
+    assert report.judge_output is not None
+    assert report.judge_output.model_id == kimi_model
+    assert report.concise_explanation.startswith("The retained evidence supports the complete claim.")
+    assert any(
+        trace.step_name == "decision_review"
+        and trace.requested_model_id == kimi_model
+        and trace.success
+        for trace in report.gonka_trace
+    )
+
+
 def test_unverified_vote_does_not_trigger_slow_judge_call():
     assert not needs_judge(
         verifier(verdict="false", support_score=0, support=[], contradict=["E1"]),

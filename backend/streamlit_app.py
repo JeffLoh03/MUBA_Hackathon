@@ -59,6 +59,7 @@ def render_sidebar(config) -> bool:
         st.write("Verifier 1:", config.gonka_verify_model_1 or "Not configured")
         st.write("Verifier 2:", config.gonka_verify_model_2 or "Not configured")
         st.write("Judge:", config.gonka_judge_model or "Falls back to verifier 1")
+        st.write("Decision reviewer:", config.decision_model or "Not configured")
         st.write("Vision:", config.gonka_vision_model or "OCR fallback only")
 
         st.subheader("Demo Mode")
