@@ -109,7 +109,7 @@ export function TransparencyPage() {
       <AppHeader />
       <main className="transparency-page">
         <section className="transparency-hero">
-          <div><p className="eyebrow">SQLite-backed accountability</p><h1>Transparency ledger.</h1><p>Every investigation keeps its public progress events, final evidence report, model identity, latency, and Gonka request and trace identifiers.</p></div>
+          <div><p className="eyebrow">SQLite-backed accountability</p><h1>History</h1><p>Every investigation keeps its public progress events, final evidence report, model identity, latency, and Gonka request and trace identifiers.</p></div>
           <div className="transparency-stats"><div><strong>{runs.length}</strong><span>recorded runs</span></div><div><strong>{totals.completed}</strong><span>completed</span></div><div><strong>{totals.calls}</strong><span>Gonka calls</span></div></div>
         </section>
 

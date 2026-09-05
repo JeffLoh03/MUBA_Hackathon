@@ -30,7 +30,7 @@ export function AppHeader() {
       <Link className="brand" to="/" aria-label="Verity Desk home"><span className="brand-mark"><BookOpenCheck size={19} /></span><span>VERITY DESK</span></Link>
       <nav className="header-actions" aria-label="Primary navigation">
         <span className={`system-status ${backendOnline === false ? "offline" : ""}`}><i /> {backendOnline === null ? "Checking backend" : backendOnline ? "Backend online" : "Backend offline"}</span>
-        <Link className="login-link" to="/transparency" aria-label="Transparency ledger"><Database size={17} /><span>Transparency</span></Link>
+        <Link className="login-link" to="/transparency" aria-label="Transparency ledger"><Database size={17} /><span>History</span></Link>
         <button className="login-link" type="button" onClick={() => void logout()} disabled={loggingOut} title={state?.user?.email} aria-label="Sign out"><LogOut size={17} /><span>{loggingOut ? "Signing out…" : "Sign out"}</span></button>
         {error && <span className="header-error" role="alert">{error}</span>}
       </nav>

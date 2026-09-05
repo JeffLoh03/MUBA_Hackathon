@@ -37,7 +37,7 @@ export function VerificationForm({ input, image, mode, error, showBrowser, onInp
       <div className="section-label"><span>NEW INVESTIGATION</span><span>LIVE GONKA REVIEW</span></div>
       <div className="hero-copy">
         <div><p className="eyebrow">Evidence-led news verification</p><h1>Check the claim.<br />Trace the evidence.</h1></div>
-        <p className="intro">Paste a claim or article link, or attach a news image. Two Gonka models review the evidence while source rules check credibility.</p>
+        <p className="intro">Paste a claim or article link, or attach a news image. Three Gonka models review the evidence while source rules check credibility.</p>
       </div>
       <div className="verification-panel">
         <label htmlFor="verification-input">WHAT SHOULD WE CHECK?</label>

@@ -98,7 +98,8 @@ winget install --id UB-Mannheim.TesseractOCR --exact --source winget
 Create the local environment file if it does not exist:
 
 ```powershell
-Copy-Item .env.example .env
+# for mac user use 'cp' instead of 'Copy-Item'
+Copy-Item .env.example .env 
 notepad .env
 ```
 

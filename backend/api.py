@@ -52,7 +52,7 @@ class VerificationRequest(BaseModel):
         return self
 
 
-app = FastAPI(title="Verity Desk API", version="0.3.0", dependencies=[Depends(require_same_origin)])
+app = FastAPI(title="Verity Desk API", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -61,7 +61,7 @@ app.add_middleware(
         "http://localhost:5174",
         "http://127.0.0.1:5174",
     ],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
