@@ -4,6 +4,10 @@ Hackathon MVP for evidence-led news verification through Gonka Router.
 
 The primary interface is the React + Vite frontend, connected to the packaged Python backend. `backend/streamlit_app.py` remains only as a legacy Streamlit fallback.
 
+## Video Demonstration
+
+[Watch the video demonstration on YouTube](https://youtu.be/y6r1veRv1LQ).
+
 ## What Makes It Different
 
 The app does not ask one model to guess whether an article is true. It separates verification into:
